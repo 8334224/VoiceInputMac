@@ -1,107 +1,177 @@
 # VoiceInputMac
 
-一个只在 macOS 上运行的菜单栏语音输入工具，方案按下面这条链路实现：
+VoiceInputMac is an open-source macOS menu bar voice input tool focused on one problem:
 
-- 苹果 `macOS 26` 新版 `Speech` 框架做实时听写
-- 本地福建口音增强包 + 本地替换规则做口音纠错
-- 可选 OpenAI 兼容接口做在线二次优化
-- 最终文本自动粘贴到当前激活应用
+- improving first-pass speech-to-text accuracy
 
-## 当前交互方式
+The project is intentionally not centered on chat, summarization, or full-document rewriting. Its main goal is to make local dictation on macOS more reliable, especially for Chinese speech input and real-world short-form text entry.
 
-- 单击一次全局热键开始听写
-- 再按一次相同热键结束听写
-- 暂不做“按住说话、松开结束”
+## What the project does
 
-默认热键当前为：
+VoiceInputMac currently provides:
 
-- `Option + Command + Space`
+- a macOS menu bar app with global hotkey start/stop dictation
+- local microphone capture with session-level audio caching
+- structured transcript segments instead of plain text only
+- rule-based suspicious-span detection
+- local clip extraction for partial re-recognition
+- multi-backend re-recognition experiments
+- candidate evaluation, comparison, and experiment export
+- optional post-pass online optimization
+- automatic paste into the active app
 
-说明：`Fn` 单键在 macOS 上不是稳定的全局热键输入来源，很多机器和系统设置会把它拦截给系统功能，所以产品默认不应该依赖 `Fn` 单键。
+## Current architecture
 
-## 功能
+The current recognition stack is split into reusable layers:
 
-- 全局热键开始/结束听写
-- 菜单栏常驻，不抢前台窗口
-- 使用 `DictationTranscriber + SpeechAnalyzer`
-- 支持增量结果和快速 finalization
-- 内置福建地名与常见误识别纠错包
-- 自定义短语词表，适合人名、产品名、行业词
-- 自定义替换规则，适合长期迭代个人口音纠错
-- 支持 OpenAI 兼容接口在线纠错
-- 内置可编辑提示词模板
-- 自动粘贴，可尽量恢复原剪贴板文本
+- `AudioCaptureService`
+  - microphone capture
+  - session audio caching
+  - clip extraction by time range
+- `RecognitionBackend`
+  - Apple Speech for the main dictation path
+  - Apple Speech on-device and WhisperKit for experimental local re-recognition
+- `TextPostProcessor`
+  - local phrase correction
+  - conservative post-processing
+- `SuspicionDetector`
+  - marks likely bad spans in the first-pass transcript
+- `ReRecognitionPlanner`
+  - chooses which suspicious spans are worth re-running
+- `ReRecognitionEvaluator`
+  - scores alternative candidates using rule-based quality signals
+- `CandidateResolver`
+  - compares backend candidates and summarizes experiment outcomes
 
-## 领先体验的关键设计
+## Main project direction
 
-为了把体验做得更靠前，当前产品策略是：
+This repository is being developed as a practical experimentation platform for:
 
-1. 首层识别优先走苹果本地模型，保证起速快。
-2. 在线优化只在结束后做，不拖慢你说话时的回显。
-3. 口音纠错分三层：内置福建包、用户自定义词库、在线优化提示词。
-4. 本地替换规则优先保守，避免“纠错过度”。
-5. 短语和提示词都可编辑，方便持续把你的个人口音喂进去。
+- fixed-language Chinese recognition
+- hotwords and custom lexicons
+- suspicious segment detection
+- localized re-recognition instead of full-text rewriting
+- backend comparison for difficult spans
+- repeatable regression testing for transcription quality
 
-## 使用前提
+## Why this repository exists
 
-你这台机器当前只有 `Command Line Tools`，没有完整 Xcode，而且本机 `Swift 6.2.4` 与当前 `macOS 26 SDK` 有版本错位。这个项目源码已经搭好，但要真正编译出 `.app`，建议先满足下面条件之一：
+Most speech products optimize for convenience after recognition. This project is biased toward a different goal:
 
-1. 安装匹配当前系统 SDK 的完整 Xcode，并把 `xcode-select` 切过去。
-2. 或者安装与当前 SDK 匹配的 Apple toolchain。
+- reduce errors in the first transcription pass
 
-推荐做法：
+That leads to a different engineering focus:
+
+- segment-level metadata
+- replayable audio windows
+- suspicious-span planning
+- candidate comparison
+- repeatable experiment export
+
+## Current status
+
+The project is usable as a macOS voice input shell and an active experimentation platform for recognition quality work.
+
+What is already implemented:
+
+- menu bar app
+- settings storage
+- global hotkey control
+- microphone permissions and accessibility flow
+- Apple Speech main dictation path
+- experimental WhisperKit local re-recognition path
+- structured JSON export for repeatable experiments
+
+What is still evolving:
+
+- stronger Chinese suspicious-span rules
+- more stable backend divergence signals
+- better ranking for near-correct Chinese candidates
+- more fixed-audio regression coverage
+
+## Running locally
+
+In the project root:
 
 ```bash
-sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+swift build
+swift run VoiceInputMac
 ```
 
-然后在项目根目录执行：
+If you want to build the app bundle:
 
 ```bash
-swift build -c release
 ./scripts/build_app.sh
 ```
 
-成功后输出：
+Output:
 
 - `dist/VoiceInputMac.app`
 
-## 首次运行权限
+## Permissions
 
-首次运行时需要允许：
+The app requires:
 
-- 麦克风
-- 语音识别
-- 辅助功能
+- Microphone
+- Speech Recognition
+- Accessibility
 
-其中“辅助功能”用于把识别后的文本自动粘贴进当前应用。
+Accessibility is used for text insertion into the active application.
 
-## 内置福建口音增强包
+## Fixed-audio experiment entry
 
-默认启用，主要包含两类能力：
+The repository also includes a minimal fixed-audio experiment entry for repeatable testing.
 
-- 地名与技术词短语优先级提升
-- 保守型常见误识别替换规则
+Example:
 
-你仍然可以继续补充自己的：
+```bash
+VOICEINPUT_FIXED_AUDIO_PATH="/absolute/path/to/sample.m4a" \
+VOICEINPUT_FIXED_AUDIO_MODE="blended" \
+VOICEINPUT_FIXED_AUDIO_SAMPLE_LABEL="long_sentence" \
+VOICEINPUT_FIXED_AUDIO_SESSION_TAG="sample-01" \
+swift test --filter FixedAudioExperimentRunnerTests/testRunLocalAudioExperimentFromEnvironment
+```
 
-- 常说的人名
-- 公司名
-- 产品名
-- 英文缩写
-- 个人习惯说法
+Exported experiment JSON files are saved to:
 
-## 提示词模板变量
+- `~/Library/Application Support/VoiceInputMac/ReRecognitionExperiments`
 
-在线优化模板支持这些变量：
+## Roadmap
 
-- `{{EXTRA_PROMPT}}`
-- `{{PRIORITY_PHRASES}}`
-- `{{RULE_HINTS}}`
-- `{{TEXT}}`
+Near-term priorities:
 
-这样你后续可以针对不同模型不断调教，而不用改代码。
+- improve Chinese first-pass error detection
+- improve candidate evaluation for near-correct Chinese outputs
+- expand fixed-audio regression testing
+- identify samples that produce meaningful backend ordering differences
 
-## 说明
+Mid-term priorities:
 
-我尝试读取你提供的 ChatGPT 分享链接，但当前环境没拿到可用内容，所以实现主要按你的描述和本机 `macOS 26 Speech` SDK 能力来落地。
+- stronger hotword and user lexicon management
+- more reliable local re-recognition scheduling
+- better promotion criteria for partial candidate replacement
+
+## Contributing
+
+Contributions are welcome, especially in:
+
+- macOS / Swift / SwiftUI engineering
+- speech recognition evaluation
+- Chinese transcription quality analysis
+- reproducible test samples
+- fixed-audio regression workflows
+
+Useful contribution types:
+
+- bug reports with exported experiment JSON
+- fixed-audio samples that expose backend differences
+- improvements to suspicious-span rules
+- improvements to candidate evaluation logic
+
+## Repository focus
+
+This repository should be read as:
+
+- a real macOS utility
+- an active OSS speech-quality experiment platform
+- a codebase focused on first-pass dictation quality, not assistant-style text rewriting
