@@ -5,6 +5,7 @@ final class AudioCaptureService {
     enum AudioCaptureError: LocalizedError {
         case alreadyRunning
         case noInputDevice
+        case cannotStartEngine
         case noRecordedAudio
         case invalidClipRange
         case cannotAllocateBuffer
@@ -15,6 +16,8 @@ final class AudioCaptureService {
                 return "当前已有一段录音正在进行。"
             case .noInputDevice:
                 return "没有可用的麦克风输入设备。"
+            case .cannotStartEngine:
+                return "麦克风当前不可用，请检查输入设备、系统输入源或是否被其他应用独占。"
             case .noRecordedAudio:
                 return "当前会话没有可用的录音缓存。"
             case .invalidClipRange:
@@ -39,6 +42,10 @@ final class AudioCaptureService {
 
     func startSession(onBuffer: @escaping AudioBufferHandler) throws -> SessionAudioArtifact {
         guard !isRunning else { throw AudioCaptureError.alreadyRunning }
+
+        guard AVCaptureDevice.default(for: .audio) != nil else {
+            throw AudioCaptureError.noInputDevice
+        }
 
         let inputNode = audioEngine.inputNode
         let inputFormat = inputNode.inputFormat(forBus: 0)
@@ -79,7 +86,16 @@ final class AudioCaptureService {
         }
 
         audioEngine.prepare()
-        try audioEngine.start()
+        do {
+            try audioEngine.start()
+        } catch {
+            inputNode.removeTap(onBus: 0)
+            self.audioFile = nil
+            self.currentSession = nil
+            self.currentFormat = nil
+            self.onBuffer = nil
+            throw AudioCaptureError.cannotStartEngine
+        }
         isRunning = true
         return session
     }

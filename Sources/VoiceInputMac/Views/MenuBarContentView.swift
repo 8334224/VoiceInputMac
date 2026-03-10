@@ -60,9 +60,18 @@ struct MenuBarContentView: View {
             }
 
             if !appState.lastError.isEmpty {
-                Text(appState.lastError)
-                    .font(.caption)
-                    .foregroundStyle(.red)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(appState.lastError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+
+                    if !appState.recoveryActionTitle.isEmpty {
+                        Button(appState.recoveryActionTitle) {
+                            appState.performRecoveryAction()
+                        }
+                        .font(.caption)
+                    }
+                }
             }
 
             HStack {
@@ -75,49 +84,51 @@ struct MenuBarContentView: View {
                 }
             }
 
-            Divider()
+            if appState.isExperimentUIEnabled {
+                Divider()
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("固定样本实验")
-                    .font(.subheadline.weight(.semibold))
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("固定样本实验")
+                        .font(.subheadline.weight(.semibold))
 
-                Picker("重识别顺序", selection: $appState.experimentOrderMode) {
-                    Text("fixed").tag(ReRecognitionOrderMode.fixed)
-                    Text("session").tag(ReRecognitionOrderMode.session)
-                    Text("blended").tag(ReRecognitionOrderMode.blended)
-                }
-                .pickerStyle(.segmented)
-                .controlSize(.small)
-
-                Picker("样本标签", selection: $appState.experimentSampleLabel) {
-                    ForEach(sampleLabelOptions) { option in
-                        Text(option.title).tag(option.value)
+                    Picker("重识别顺序", selection: $appState.experimentOrderMode) {
+                        Text("fixed").tag(ReRecognitionOrderMode.fixed)
+                        Text("session").tag(ReRecognitionOrderMode.session)
+                        Text("blended").tag(ReRecognitionOrderMode.blended)
                     }
-                }
-                .pickerStyle(.menu)
+                    .pickerStyle(.segmented)
+                    .controlSize(.small)
 
-                TextField("sessionTag，例如 sample-01", text: $appState.experimentSessionTag)
-                    .textFieldStyle(.roundedBorder)
+                    Picker("样本标签", selection: $appState.experimentSampleLabel) {
+                        ForEach(sampleLabelOptions) { option in
+                            Text(option.title).tag(option.value)
+                        }
+                    }
+                    .pickerStyle(.menu)
 
-                Button("导出本次实验 JSON") {
-                    Task { await appState.exportLatestExperimentJSON() }
-                }
-                .disabled(appState.transcriptPreview.isEmpty && appState.finalTranscript.isEmpty)
+                    TextField("sessionTag，例如 sample-01", text: $appState.experimentSessionTag)
+                        .textFieldStyle(.roundedBorder)
 
-                Text("导出目录：\(appState.experimentExportDirectoryPath())")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+                    Button("导出本次实验 JSON") {
+                        Task { await appState.exportLatestExperimentJSON() }
+                    }
+                    .disabled(appState.transcriptPreview.isEmpty && appState.finalTranscript.isEmpty)
 
-                if !appState.lastExperimentExportPath.isEmpty {
-                    Text("最近导出：\(appState.lastExperimentExportPath)")
+                    Text("导出目录：\(appState.experimentExportDirectoryPath())")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
-                }
-            }
 
-            Divider()
+                    if !appState.lastExperimentExportPath.isEmpty {
+                        Text("最近导出：\(appState.lastExperimentExportPath)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+
+                Divider()
+            }
 
             HStack {
                 SettingsLink {
@@ -125,7 +136,7 @@ struct MenuBarContentView: View {
                 }
                 Spacer()
                 Button("退出") {
-                    NSApplication.shared.terminate(nil)
+                    appState.terminateApplication()
                 }
             }
         }

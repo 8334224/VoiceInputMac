@@ -33,6 +33,9 @@ struct SettingsView: View {
     private let maxContentWidth: CGFloat = 860
     private let topCardHeight: CGFloat = 212
     private let topCardSpacing: CGFloat = 16
+    private let isDebugSettingsEnabled =
+        ProcessInfo.processInfo.environment["VOICEINPUTMAC_ENABLE_EXPERIMENTS"] == "1" ||
+        ProcessInfo.processInfo.arguments.contains("--enable-experiments")
     private let localeOptions: [LocaleOption] = [
         .init(id: "zh-CN", title: "简体中文"),
         .init(id: "zh-HK", title: "中文（香港）"),
@@ -54,7 +57,9 @@ struct SettingsView: View {
                         topGrid(trackWidth: trackWidth)
                         onlinePanel
                         correctionPanel
-                        promptPanel
+                        if isDebugSettingsEnabled {
+                            promptPanel
+                        }
                     }
                     .frame(width: trackWidth, alignment: .leading)
                     .padding(.top, 18)
@@ -79,7 +84,7 @@ struct SettingsView: View {
                     .foregroundStyle(textPrimary)
                     .lineLimit(1)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("先看得清，再调得快。常用项前置，低频项折叠。")
+                Text("把常用项放前面：语言、热键、在线优化、热词词库。调试级配置默认隐藏。")
                     .font(.subheadline)
                     .foregroundStyle(textSecondary)
                     .lineLimit(2)
@@ -210,7 +215,7 @@ struct SettingsView: View {
     }
 
     private var accentPanel: some View {
-        panel(icon: "waveform.path.ecg", title: "福建口音", subtitle: "本地先兜底") {
+        panel(icon: "waveform.path.ecg", title: "福建口音", subtitle: "默认关闭，口音明显时再开") {
             VStack(alignment: .leading, spacing: 12) {
                 compactSwitch("启用内置纠错包", isOn: settingsStore.binding(for: \.enableBuiltInFujianPack))
 
@@ -226,93 +231,119 @@ struct SettingsView: View {
         panel(
             icon: "bolt.horizontal.circle",
             title: "在线优化",
-            subtitle: "火山 Coding Plan 默认链路",
+            subtitle: "默认关闭，需要时再开",
             accessory: {
                 compactSwitch("启用在线纠错", isOn: settingsStore.binding(for: \.onlineOptimizationEnabled))
             }
         ) {
             DisclosureGroup(isExpanded: $showsOnlinePanel) {
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack(spacing: 12) {
-                        Picker("提供方", selection: Binding(
-                            get: { settingsStore.settings.onlineProvider },
-                            set: { settingsStore.setOnlineProvider($0) }
-                        )) {
-                            ForEach(OnlineProvider.allCases) { provider in
-                                Text(provider.title).tag(provider)
+                    if isDebugSettingsEnabled {
+                        HStack(spacing: 12) {
+                            Picker("提供方", selection: Binding(
+                                get: { settingsStore.settings.onlineProvider },
+                                set: { settingsStore.setOnlineProvider($0) }
+                            )) {
+                                ForEach(OnlineProvider.allCases) { provider in
+                                    Text(provider.title).tag(provider)
+                                }
                             }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
+                            .controlSize(.small)
+                            .frame(width: 320)
+                            Spacer(minLength: 0)
+                            Button {
+                                Task { await settingsStore.testOnlineOptimization() }
+                            } label: {
+                                Text(testButtonTitle)
+                                    .frame(minWidth: 96)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .disabled(isTestingOnlineOptimization)
                         }
-                        .labelsHidden()
-                        .pickerStyle(.segmented)
-                        .controlSize(.small)
-                        .frame(width: 320)
-                        Spacer(minLength: 0)
-                        Button {
-                            Task { await settingsStore.testOnlineOptimization() }
-                        } label: {
-                            Text(testButtonTitle)
-                                .frame(minWidth: 96)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        .disabled(isTestingOnlineOptimization)
-                    }
 
-                    Text(settingsStore.settings.onlineProvider.description)
-                        .font(.caption)
-                        .foregroundStyle(textSecondary)
+                        Text(settingsStore.settings.onlineProvider.description)
+                            .font(.caption)
+                            .foregroundStyle(textSecondary)
 
-                    HStack(alignment: .top, spacing: 12) {
-                        fieldBlock("接口地址") {
-                            HStack(spacing: 8) {
+                        HStack(alignment: .top, spacing: 12) {
+                            fieldBlock("接口地址") {
+                                HStack(spacing: 8) {
+                                    fieldShell {
+                                        TextField("接口地址", text: settingsStore.binding(for: \.apiEndpoint))
+                                            .textFieldStyle(.plain)
+                                            .foregroundStyle(textPrimary)
+                                    }
+                                    Button("预设") {
+                                        settingsStore.applyOnlineProviderDefaults()
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                }
+                            }
+
+                            fieldBlock("模型") {
                                 fieldShell {
-                                    TextField("接口地址", text: settingsStore.binding(for: \.apiEndpoint))
+                                    TextField("模型名", text: settingsStore.binding(for: \.modelName))
                                         .textFieldStyle(.plain)
                                         .foregroundStyle(textPrimary)
                                 }
-                                Button("预设") {
-                                    settingsStore.applyOnlineProviderDefaults()
+                            }
+                            .frame(width: 180)
+                        }
+
+                        HStack(alignment: .top, spacing: 12) {
+                            fieldBlock("API Key") {
+                                fieldShell {
+                                    SecureField("API Key", text: settingsStore.binding(for: \.apiKey))
+                                        .textFieldStyle(.plain)
+                                        .foregroundStyle(textPrimary)
                                 }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
                             }
+
+                            fieldBlock("超时") {
+                                fieldShell {
+                                    TextField("8", value: settingsStore.binding(for: \.requestTimeoutSeconds), format: .number)
+                                        .textFieldStyle(.plain)
+                                        .foregroundStyle(textPrimary)
+                                }
+                            }
+                            .frame(width: 88)
                         }
 
-                        fieldBlock("模型") {
+                        fieldBlock("补充要求") {
                             fieldShell {
-                                TextField("模型名", text: settingsStore.binding(for: \.modelName))
+                                TextField("可留空", text: settingsStore.binding(for: \.extraPrompt), axis: .vertical)
                                     .textFieldStyle(.plain)
                                     .foregroundStyle(textPrimary)
+                                    .lineLimit(1 ... 2)
                             }
                         }
-                        .frame(width: 180)
-                    }
+                    } else {
+                        Text("开启后会在首轮结果基础上做一次在线纠错。普通 Beta 使用只需要填 API Key；接口和模型保持默认即可。")
+                            .font(.caption)
+                            .foregroundStyle(textSecondary)
 
-                    HStack(alignment: .top, spacing: 12) {
                         fieldBlock("API Key") {
-                            fieldShell {
-                                SecureField("API Key", text: settingsStore.binding(for: \.apiKey))
-                                    .textFieldStyle(.plain)
-                                    .foregroundStyle(textPrimary)
-                            }
-                        }
+                            HStack(spacing: 12) {
+                                fieldShell {
+                                    SecureField("API Key", text: settingsStore.binding(for: \.apiKey))
+                                        .textFieldStyle(.plain)
+                                        .foregroundStyle(textPrimary)
+                                }
 
-                        fieldBlock("超时") {
-                            fieldShell {
-                                TextField("8", value: settingsStore.binding(for: \.requestTimeoutSeconds), format: .number)
-                                    .textFieldStyle(.plain)
-                                    .foregroundStyle(textPrimary)
+                                Button {
+                                    Task { await settingsStore.testOnlineOptimization() }
+                                } label: {
+                                    Text(testButtonTitle)
+                                        .frame(minWidth: 96)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                .disabled(isTestingOnlineOptimization)
                             }
-                        }
-                        .frame(width: 88)
-                    }
-
-                    fieldBlock("补充要求") {
-                        fieldShell {
-                            TextField("可留空", text: settingsStore.binding(for: \.extraPrompt), axis: .vertical)
-                                .textFieldStyle(.plain)
-                                .foregroundStyle(textPrimary)
-                                .lineLimit(1 ... 2)
                         }
                     }
 
@@ -330,11 +361,11 @@ struct SettingsView: View {
                 .padding(.top, 8)
             } label: {
                 HStack {
-                    Text("展开 AI 模块配置")
+                    Text(isDebugSettingsEnabled ? "展开在线优化配置" : "展开在线优化设置")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(textPrimary)
                     Spacer()
-                    Text(settingsStore.settings.onlineProvider.title)
+                    Text(settingsStore.settings.onlineOptimizationEnabled ? "已开启" : "已关闭")
                         .font(.caption)
                         .foregroundStyle(textSecondary)
                 }
@@ -346,8 +377,8 @@ struct SettingsView: View {
     private var correctionPanel: some View {
         panel(
             icon: "text.quote",
-            title: "纠错词库",
-            subtitle: "个人短语和替换规则",
+            title: "热词与词库",
+            subtitle: "个人短语、术语和替换规则",
             accessory: {
                 HStack(spacing: 8) {
                     Button("填入样例") {
@@ -381,11 +412,11 @@ struct SettingsView: View {
                     .padding(.top, 6)
             } label: {
                 HStack {
-                    Text("展开编辑个人词库")
+                    Text("展开编辑热词与词库")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(textPrimary)
                     Spacer()
-                    Text("短语 + 替换规则")
+                    Text("热词 + 替换规则")
                         .font(.caption)
                         .foregroundStyle(textSecondary)
                 }

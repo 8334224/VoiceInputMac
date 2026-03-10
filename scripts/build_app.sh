@@ -10,6 +10,7 @@ ZIP_PATH="$ROOT_DIR/dist/${APP_NAME}-${VERSION}-macOS.zip"
 CACHE_DIR="$ROOT_DIR/.codex-cache"
 ICON_SCRIPT="$ROOT_DIR/scripts/generate_app_icon.swift"
 ICNS_PATH="$ROOT_DIR/Resources/VoiceInputMac.icns"
+APP_SIGN_IDENTITY="${APP_SIGN_IDENTITY:--}"
 
 cd "$ROOT_DIR"
 mkdir -p "$CACHE_DIR/clang" "$CACHE_DIR/swiftpm"
@@ -73,6 +74,14 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+if [[ "$APP_SIGN_IDENTITY" == "-" ]]; then
+  /usr/bin/codesign --force --deep --sign - "$APP_DIR"
+  echo "Applied ad-hoc bundle signing. Not notarized."
+else
+  /usr/bin/codesign --force --deep --options runtime --sign "$APP_SIGN_IDENTITY" "$APP_DIR"
+  echo "Applied Developer ID signing with identity: $APP_SIGN_IDENTITY"
+  echo "Not notarized yet. See docs/ReleaseSigning.md for notarization steps."
+fi
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$ZIP_PATH"
 
 echo "Built app bundle at: $APP_DIR"

@@ -108,6 +108,11 @@ Output:
 
 - `dist/VoiceInputMac.app`
 
+Beta install and distribution notes:
+
+- [`docs/BetaInstall.md`](docs/BetaInstall.md)
+- [`docs/ReleaseSigning.md`](docs/ReleaseSigning.md)
+
 ## Permissions
 
 The app requires:

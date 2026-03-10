@@ -31,7 +31,7 @@ struct AppSettings: Codable {
         apiEndpoint = onlineProvider.defaultEndpoint
         apiKey = ""
         modelName = onlineProvider.defaultModel
-        enableBuiltInFujianPack = true
+        enableBuiltInFujianPack = false
         enableCustomCorrectionLexicon = true
         customPhrasesText = ""
         replacementRulesText = ""

@@ -169,6 +169,7 @@ final class HotKeyController {
     private var eventHandler: EventHandlerRef?
     private let callback: () -> Void
     private let hotKeyID = EventHotKeyID(signature: OSType(0x56494D43), id: 1)
+    private var currentDescriptor: HotKeyDescriptor?
 
     init(callback: @escaping () -> Void) {
         self.callback = callback
@@ -184,25 +185,23 @@ final class HotKeyController {
 
     @discardableResult
     func update(descriptor: HotKeyDescriptor) -> String? {
+        let previousDescriptor = currentDescriptor
         unregister()
 
-        let status = RegisterEventHotKey(
-            descriptor.keyCode,
-            descriptor.modifiers,
-            hotKeyID,
-            GetApplicationEventTarget(),
-            0,
-            &hotKeyRef
-        )
+        let status = register(descriptor: descriptor)
 
         guard status == noErr else {
             hotKeyRef = nil
-            if status == eventHotKeyExistsErr {
-                return "快捷键已被系统或其他应用占用，请在设置里换一个。"
+            if let previousDescriptor {
+                _ = register(descriptor: previousDescriptor)
             }
-            return "快捷键注册失败，错误码：\(status)。"
+            if status == eventHotKeyExistsErr {
+                return "快捷键已被系统或其他应用占用，已保留上一次可用快捷键。你仍可从菜单栏点击“开始听写”。"
+            }
+            return "快捷键注册失败，已保留上一次可用快捷键。你仍可从菜单栏点击“开始听写”。错误码：\(status)。"
         }
 
+        currentDescriptor = descriptor
         return nil
     }
 
@@ -243,5 +242,16 @@ final class HotKeyController {
             UnregisterEventHotKey(hotKeyRef)
             self.hotKeyRef = nil
         }
+    }
+
+    private func register(descriptor: HotKeyDescriptor) -> OSStatus {
+        RegisterEventHotKey(
+            descriptor.keyCode,
+            descriptor.modifiers,
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &hotKeyRef
+        )
     }
 }

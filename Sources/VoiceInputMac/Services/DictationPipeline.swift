@@ -28,6 +28,7 @@ final class DictationPipeline {
     private let enabledReRecognitionBackends = ReRecognitionBackendOption.allCases.filter(\.shouldRunByDefault)
     private var reRecognitionOrderMode: ReRecognitionOrderMode = .blended
     private var experimentTag = ReRecognitionExperimentTag(sampleLabel: nil, sessionTag: nil)
+    private var experimentPathEnabled = false
 
     private var correctionPipeline = TextCorrectionPipeline(settings: .init())
     private var postProcessor: any TextPostProcessor = BasicTextPostProcessor(correctionPipeline: .init(settings: .init()))
@@ -45,6 +46,7 @@ final class DictationPipeline {
         onPreview: @escaping @Sendable (String) -> Void,
         onSegments: @escaping @Sendable ([TranscriptSegment]) -> Void = { _ in }
     ) async throws {
+        await awaitPendingReRecognitionIfNeeded()
         guard !running else { throw DictationError.alreadyRunning }
 
         correctionPipeline = TextCorrectionPipeline(settings: settings)
@@ -117,7 +119,14 @@ final class DictationPipeline {
         try? await Task.sleep(nanoseconds: 180_000_000)
 
         let sessionAudio = audioCaptureService.stopSession()
-        let finalizedSnapshot = try await recognitionBackend.finish()
+        let finalizedSnapshot: RecognitionResultSnapshot
+        do {
+            finalizedSnapshot = try await recognitionBackend.finish()
+        } catch {
+            recognitionBackend.cancel()
+            self.recognitionBackend = nil
+            throw error
+        }
         self.recognitionBackend = nil
 
         let postProcessed = postProcessor.process(finalizedSnapshot)
@@ -223,6 +232,14 @@ final class DictationPipeline {
         reRecognitionOrderMode = mode
     }
 
+    func setExperimentPathEnabled(_ enabled: Bool) {
+        experimentPathEnabled = enabled
+    }
+
+    func isExperimentPathEnabled() -> Bool {
+        experimentPathEnabled
+    }
+
     func currentReRecognitionOrderMode() -> ReRecognitionOrderMode {
         reRecognitionOrderMode
     }
@@ -256,6 +273,7 @@ final class DictationPipeline {
         settings: AppSettings
     ) async throws {
         await awaitPendingReRecognitionIfNeeded()
+        experimentPathEnabled = true
 
         correctionPipeline = TextCorrectionPipeline(settings: settings)
         postProcessor = BasicTextPostProcessor(correctionPipeline: correctionPipeline)
@@ -344,6 +362,15 @@ final class DictationPipeline {
         try ReRecognitionExperimentExportStore.directoryURL()
     }
 
+    func cancelCurrentSession() {
+        recognitionBackend?.cancel()
+        recognitionBackend = nil
+        audioCaptureService.cancelSession()
+        pendingReRecognitionTask?.cancel()
+        pendingReRecognitionTask = nil
+        running = false
+    }
+
     func extractAudioClip(startTime: TimeInterval, endTime: TimeInterval) throws -> URL {
         guard let sessionAudio = lastSessionRecord?.audio else {
             throw DictationError.missingSessionAudio
@@ -357,6 +384,7 @@ final class DictationPipeline {
     }
 
     private func logSuspiciousSegmentsIfNeeded(_ segments: [TranscriptSegment], isFinal: Bool) {
+        guard experimentPathEnabled else { return }
         let flaggedSegments = segments.filter { !$0.suspicionFlags.isEmpty }
         guard !flaggedSegments.isEmpty else { return }
 
@@ -388,6 +416,10 @@ final class DictationPipeline {
     }
 
     private func scheduleReRecognition(sessionRecord: DictationSessionRecord, settings: AppSettings) {
+        guard experimentPathEnabled else {
+            pendingReRecognitionTask = nil
+            return
+        }
         guard let audio = sessionRecord.audio else { return }
 
         let plans = reRecognitionPlanner.makePlans(
@@ -483,6 +515,7 @@ final class DictationPipeline {
     }
 
     private func logReRecognitionPlans(_ plans: [ReRecognitionPlan]) {
+        guard experimentPathEnabled else { return }
         guard !plans.isEmpty else {
             print("[ReRecognitionPlanner] no plans")
             return
@@ -548,6 +581,7 @@ final class DictationPipeline {
     }
 
     private func logReRecognitionEvaluation(_ evaluation: ReRecognitionCandidateRecord) {
+        guard experimentPathEnabled else { return }
         let reasons = evaluation.decisionReasons.joined(separator: " | ")
         print(
             "[ReRecognitionEvaluation] mode=\(evaluation.replacementMode.rawValue) " +
@@ -560,6 +594,7 @@ final class DictationPipeline {
     }
 
     private func logCandidateStoreSnapshot() async {
+        guard experimentPathEnabled else { return }
         let summary = await latestReRecognitionSummary()
         let comparisons = await candidateComparisonsBySegmentIDs()
         let readyForReview = comparisons.filter(\.readyForReview).count
@@ -618,6 +653,7 @@ final class DictationPipeline {
         strategySource: ReRecognitionOrderStrategySource,
         rankedBackends: [BackendPriorityEntry]
     ) {
+        guard experimentPathEnabled else { return }
         let triggerFlags = plan.triggerFlags.map(\.code).joined(separator: ",")
         let order = rankedBackends.map {
             "\($0.backend)(score:\($0.score),flags:\($0.matchedTriggerFlags.joined(separator: "+")),reasons:\($0.reasons.joined(separator: "|")))"
