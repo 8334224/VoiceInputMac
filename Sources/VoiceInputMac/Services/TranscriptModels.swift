@@ -41,6 +41,17 @@ struct SessionAudioArtifact: Equatable, Sendable {
     let sampleRate: Double
     let channelCount: UInt32
     var duration: TimeInterval
+    let inputDevice: ActiveInputDeviceInfo?
+}
+
+struct ActiveInputDeviceInfo: Equatable, Sendable {
+    let id: String?
+    let name: String
+    let selectionMode: MicrophoneSelectionMode
+
+    var isSystemDefaultSelection: Bool {
+        selectionMode == .systemDefault
+    }
 }
 
 struct DictationSessionRecord: Equatable, Sendable {

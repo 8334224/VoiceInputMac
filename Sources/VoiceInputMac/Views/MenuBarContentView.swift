@@ -32,6 +32,18 @@ struct MenuBarContentView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
+            if appState.isRecording, !appState.activeInputDeviceName.isEmpty {
+                Text("当前输入：\(appState.activeInputDeviceName)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !appState.completionDetail.isEmpty {
+                Text(appState.completionDetail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             ScrollView {
                 Text(appState.transcriptPreview.isEmpty ? "按下热键后开始说话，再按一次结束。" : appState.transcriptPreview)
                     .frame(maxWidth: .infinity, alignment: .leading)

@@ -9,6 +9,7 @@ struct SettingsView: View {
     }
 
     @EnvironmentObject private var settingsStore: SettingsStore
+    @EnvironmentObject private var appState: AppState
     @State private var showsOnlinePanel = false
     @State private var showsCorrectionEditors = false
     @State private var showsPromptTemplates = false
@@ -31,7 +32,7 @@ struct SettingsView: View {
     private let fieldStroke = Color(red: 0.84, green: 0.86, blue: 0.90)
     private let panelFill = Color.white.opacity(0.88)
     private let maxContentWidth: CGFloat = 860
-    private let topCardHeight: CGFloat = 212
+    private let topCardHeight: CGFloat = 248
     private let topCardSpacing: CGFloat = 16
     private let isDebugSettingsEnabled =
         ProcessInfo.processInfo.environment["VOICEINPUTMAC_ENABLE_EXPERIMENTS"] == "1" ||
@@ -71,6 +72,9 @@ struct SettingsView: View {
         }
         .frame(width: 900, height: 660)
         .preferredColorScheme(.light)
+        .task {
+            settingsStore.reloadMicrophoneDevices()
+        }
         .onDisappear {
             stopHotKeyCapture()
         }
@@ -170,6 +174,62 @@ struct SettingsView: View {
                         .frame(width: 168, alignment: .leading)
                     compactSwitch("恢复剪贴板", isOn: settingsStore.binding(for: \.preserveClipboard))
                         .frame(width: 150, alignment: .leading)
+                }
+
+                fieldBlock("麦克风") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            Menu {
+                                Button("使用系统默认输入设备") {
+                                    settingsStore.useSystemDefaultMicrophone()
+                                }
+
+                                if !settingsStore.microphoneDevices.isEmpty {
+                                    Divider()
+                                    ForEach(settingsStore.microphoneDevices) { device in
+                                        Button(device.name) {
+                                            settingsStore.selectMicrophoneDevice(id: device.id)
+                                        }
+                                    }
+                                }
+                            } label: {
+                                HStack {
+                                    Text(settingsStore.microphoneMenuLabel())
+                                        .foregroundStyle(textPrimary)
+                                        .lineLimit(1)
+                                    Spacer(minLength: 8)
+                                    Image(systemName: "chevron.up.chevron.down")
+                                        .font(.caption2)
+                                        .foregroundStyle(textSecondary)
+                                }
+                            }
+
+                            Button("刷新") {
+                                settingsStore.reloadMicrophoneDevices()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                        .disabled(
+                            settingsStore.microphoneDevices.isEmpty &&
+                            settingsStore.settings.microphoneSelectionMode != .specificDevice
+                        )
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(settingsStore.microphoneStatus.title)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(settingsStore.microphoneStatus.isError ? Color.red : textPrimary)
+                            Text(settingsStore.microphoneStatus.detail)
+                                .font(.caption)
+                                .foregroundStyle(settingsStore.microphoneStatus.isError ? Color.red : textSecondary)
+                        }
+
+                        if appState.isRecording, !appState.activeInputDeviceName.isEmpty {
+                            Text("当前输入：\(appState.activeInputDeviceName)")
+                                .font(.caption)
+                                .foregroundStyle(textSecondary)
+                        }
+                    }
                 }
             }
         }
@@ -322,9 +382,28 @@ struct SettingsView: View {
                             }
                         }
                     } else {
-                        Text("开启后会在首轮结果基础上做一次在线纠错。普通 Beta 使用只需要填 API Key；接口和模型保持默认即可。")
+                        Text("开启后会在首轮结果基础上做一次在线纠错。先选择提供方，再填写对应的 API Key。")
                             .font(.caption)
                             .foregroundStyle(textSecondary)
+
+                        fieldBlock("提供方") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Picker("提供方", selection: Binding(
+                                    get: { settingsStore.settings.onlineProvider },
+                                    set: { settingsStore.setOnlineProvider($0) }
+                                )) {
+                                    ForEach(OnlineProvider.allCases) { provider in
+                                        Text(provider.title).tag(provider)
+                                    }
+                                }
+                                .pickerStyle(.segmented)
+                                .controlSize(.small)
+
+                                Text(settingsStore.settings.onlineProvider.description)
+                                    .font(.caption)
+                                    .foregroundStyle(textSecondary)
+                            }
+                        }
 
                         fieldBlock("API Key") {
                             HStack(spacing: 12) {
@@ -344,6 +423,71 @@ struct SettingsView: View {
                                 .controlSize(.small)
                                 .disabled(isTestingOnlineOptimization)
                             }
+                        }
+
+                        HStack(alignment: .top, spacing: 12) {
+                            fieldBlock("等待时间") {
+                                fieldShell {
+                                    TextField("8", value: settingsStore.binding(for: \.onlineSoftTimeoutSeconds), format: .number)
+                                        .textFieldStyle(.plain)
+                                        .foregroundStyle(textPrimary)
+                                }
+                            }
+                            .frame(width: 96)
+
+                            fieldBlock("总超时") {
+                                fieldShell {
+                                    TextField("8", value: settingsStore.binding(for: \.requestTimeoutSeconds), format: .number)
+                                        .textFieldStyle(.plain)
+                                        .foregroundStyle(textPrimary)
+                                }
+                            }
+                            .frame(width: 96)
+
+                            Spacer(minLength: 0)
+                        }
+
+                        Text("等待时间用于决定本地结果要等在线纠错多久；总超时是整个网络请求的上限。建议等待时间先设 8 秒。")
+                            .font(.caption)
+                            .foregroundStyle(textSecondary)
+
+                        if settingsStore.settings.onlineProvider != .volcengineCodingPlan {
+                            HStack(alignment: .top, spacing: 12) {
+                                fieldBlock("接口地址") {
+                                    fieldShell {
+                                        TextField(
+                                            settingsStore.settings.onlineProvider == .googleGemini
+                                                ? "例如 https://generativelanguage.googleapis.com/v1beta"
+                                                : "例如 https://api.openai.com/v1/chat/completions",
+                                            text: settingsStore.binding(for: \.apiEndpoint)
+                                        )
+                                            .textFieldStyle(.plain)
+                                            .foregroundStyle(textPrimary)
+                                    }
+                                }
+
+                                fieldBlock("模型") {
+                                    fieldShell {
+                                        TextField(
+                                            settingsStore.settings.onlineProvider == .googleGemini
+                                                ? "例如 gemini-3-flash-preview"
+                                                : "例如 gpt-4.1-mini",
+                                            text: settingsStore.binding(for: \.modelName)
+                                        )
+                                            .textFieldStyle(.plain)
+                                            .foregroundStyle(textPrimary)
+                                    }
+                                }
+                                .frame(width: 200)
+                            }
+
+                            Text(
+                                settingsStore.settings.onlineProvider == .googleGemini
+                                    ? "使用 Google Gemini 时，普通设置页会显示最小必填项：接口地址、模型名和 API Key。"
+                                    : "使用通用 OpenAI 兼容时，普通设置页会显示最小必填项：接口地址、模型名和 API Key。"
+                            )
+                                .font(.caption)
+                                .foregroundStyle(textSecondary)
                         }
                     }
 

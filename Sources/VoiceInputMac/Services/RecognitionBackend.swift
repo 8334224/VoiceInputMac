@@ -7,11 +7,14 @@ enum ReRecognitionBackendOption: String, CaseIterable, Sendable {
     case appleSpeech = "apple.speech"
     case appleSpeechOnDevice = "apple.speech.on_device"
     case whisperKitExperimental = "whisperkit.experimental"
+    case senseVoiceSmall = "sensevoice.small"
 
     var shouldRunByDefault: Bool {
         switch self {
         case .appleSpeech, .appleSpeechOnDevice, .whisperKitExperimental:
             return true
+        case .senseVoiceSmall:
+            return SenseVoiceSmallRecognitionBackend.isAvailable
         }
     }
 
@@ -47,6 +50,16 @@ enum ReRecognitionBackendOption: String, CaseIterable, Sendable {
                 prefersOnDevice: true,
                 intendedUseCases: ["heavy_local_correction", "mixed_language", "accent_recheck"]
             )
+        case .senseVoiceSmall:
+            return BackendCapabilities(
+                backend: rawValue,
+                displayName: "SenseVoice Small",
+                experimental: true,
+                supportsStreaming: false,
+                supportsFileReRecognition: true,
+                prefersOnDevice: true,
+                intendedUseCases: ["zh_cn_first_pass", "mixed_language", "accent_recheck", "content_word_confusion"]
+            )
         }
     }
 
@@ -58,6 +71,8 @@ enum ReRecognitionBackendOption: String, CaseIterable, Sendable {
             return AppleSpeechOnDeviceRecognitionBackend()
         case .whisperKitExperimental:
             return WhisperKitRecognitionBackend()
+        case .senseVoiceSmall:
+            return SenseVoiceSmallRecognitionBackend()
         }
     }
 
@@ -73,6 +88,8 @@ enum ReRecognitionBackendOption: String, CaseIterable, Sendable {
                 requiresOnDeviceRecognition: true
             )
         case .whisperKitExperimental:
+            return base
+        case .senseVoiceSmall:
             return base
         }
     }
@@ -482,6 +499,219 @@ final class WhisperKitRecognitionBackend: RecognitionBackend {
         let sampleRate = file.fileFormat.sampleRate
         guard sampleRate > 0 else { throw WhisperKitError.invalidAudio }
         return Double(file.length) / sampleRate
+    }
+}
+
+final class SenseVoiceSmallRecognitionBackend: RecognitionBackend {
+    enum SenseVoiceError: LocalizedError {
+        case streamingUnsupported
+        case pythonUnavailable
+        case helperScriptUnavailable
+        case modelDirectoryUnavailable
+        case inferenceFailed(String)
+        case invalidAudio
+
+        var errorDescription: String? {
+            switch self {
+            case .streamingUnsupported:
+                return "SenseVoice-Small 当前只接入了文件级重识别，不支持主链路流式会话。"
+            case .pythonUnavailable:
+                return "未找到可用的 SenseVoice Python 运行环境。"
+            case .helperScriptUnavailable:
+                return "未找到 SenseVoice 推理脚本。"
+            case .modelDirectoryUnavailable:
+                return "未找到本地 SenseVoice-Small 模型目录。"
+            case let .inferenceFailed(reason):
+                return "SenseVoice-Small 推理失败：\(reason)"
+            case .invalidAudio:
+                return "SenseVoice-Small 无法读取当前音频片段。"
+            }
+        }
+    }
+
+    private struct ScriptResponse: Decodable {
+        let text: String
+        let rawText: String?
+
+        enum CodingKeys: String, CodingKey {
+            case text
+            case rawText = "raw_text"
+        }
+    }
+
+    let identifier = "sensevoice.small"
+
+    static var isAvailable: Bool {
+        resolvePythonURL() != nil && resolveHelperScriptURL() != nil && resolveModelDirectoryURL() != nil
+    }
+
+    func startSession(
+        configuration: RecognitionConfiguration,
+        onUpdate: @escaping (RecognitionResultSnapshot) -> Void
+    ) throws {
+        _ = configuration
+        _ = onUpdate
+        throw SenseVoiceError.streamingUnsupported
+    }
+
+    func appendAudioBuffer(_ buffer: AVAudioPCMBuffer) {
+        _ = buffer
+    }
+
+    func finish() async throws -> RecognitionResultSnapshot {
+        throw SenseVoiceError.streamingUnsupported
+    }
+
+    func transcribeAudioFile(at url: URL, configuration: RecognitionConfiguration) async throws -> RecognitionResultSnapshot {
+        guard let pythonURL = Self.resolvePythonURL() else {
+            throw SenseVoiceError.pythonUnavailable
+        }
+        guard let scriptURL = Self.resolveHelperScriptURL() else {
+            throw SenseVoiceError.helperScriptUnavailable
+        }
+        guard let modelDirectoryURL = Self.resolveModelDirectoryURL() else {
+            throw SenseVoiceError.modelDirectoryUnavailable
+        }
+
+        let language = Self.languageCode(for: configuration.localeIdentifier)
+        let response = try await Self.runHelper(
+            pythonURL: pythonURL,
+            scriptURL: scriptURL,
+            modelDirectoryURL: modelDirectoryURL,
+            audioURL: url,
+            language: language
+        )
+
+        let text = response.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawText = (response.rawText ?? text).trimmingCharacters(in: .whitespacesAndNewlines)
+        let duration = try audioDuration(for: url)
+        let segmentText = text.isEmpty ? rawText : text
+
+        let segments = segmentText.isEmpty ? [] : [
+            TranscriptSegment(
+                id: "\(identifier)-0-\(Int(duration * 1000))-\(segmentText.replacingOccurrences(of: " ", with: "_"))",
+                text: segmentText,
+                startTime: 0,
+                endTime: max(0, duration),
+                isFinal: true,
+                source: identifier,
+                suspicionFlags: []
+            )
+        ]
+
+        return RecognitionResultSnapshot(
+            rawText: rawText,
+            displayText: segmentText,
+            segments: segments,
+            isFinal: true,
+            source: identifier
+        )
+    }
+
+    func cancel() {}
+
+    private func audioDuration(for url: URL) throws -> TimeInterval {
+        let file = try AVAudioFile(forReading: url)
+        let sampleRate = file.fileFormat.sampleRate
+        guard sampleRate > 0 else { throw SenseVoiceError.invalidAudio }
+        return Double(file.length) / sampleRate
+    }
+
+    private static func runHelper(
+        pythonURL: URL,
+        scriptURL: URL,
+        modelDirectoryURL: URL,
+        audioURL: URL,
+        language: String
+    ) async throws -> ScriptResponse {
+        try await withCheckedThrowingContinuation { continuation in
+            let process = Process()
+            let stdoutPipe = Pipe()
+            let stderrPipe = Pipe()
+
+            process.executableURL = pythonURL
+            process.arguments = [
+                scriptURL.path,
+                "--model-dir", modelDirectoryURL.path,
+                "--audio-path", audioURL.path,
+                "--language", language,
+                "--use-itn"
+            ]
+            process.standardOutput = stdoutPipe
+            process.standardError = stderrPipe
+
+            process.terminationHandler = { process in
+                let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                let stdout = String(decoding: stdoutData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                let stderr = String(decoding: stderrData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                guard process.terminationStatus == 0 else {
+                    continuation.resume(throwing: SenseVoiceError.inferenceFailed(stderr.isEmpty ? stdout : stderr))
+                    return
+                }
+
+                do {
+                    let decoded = try JSONDecoder().decode(ScriptResponse.self, from: Data(stdout.utf8))
+                    continuation.resume(returning: decoded)
+                } catch {
+                    continuation.resume(throwing: SenseVoiceError.inferenceFailed("无法解析输出：\(stdout)"))
+                }
+            }
+
+            do {
+                try process.run()
+            } catch {
+                continuation.resume(throwing: SenseVoiceError.inferenceFailed(error.localizedDescription))
+            }
+        }
+    }
+
+    private static func languageCode(for localeIdentifier: String) -> String {
+        let normalized = localeIdentifier.replacingOccurrences(of: "_", with: "-").lowercased()
+        if normalized.hasPrefix("zh") { return "zh" }
+        if normalized.hasPrefix("en") { return "en" }
+        if normalized.hasPrefix("ja") { return "ja" }
+        if normalized.hasPrefix("ko") { return "ko" }
+        if normalized.hasPrefix("yue") || normalized.contains("hant-hk") || normalized.contains("zh-hk") { return "yue" }
+        return "auto"
+    }
+
+    private static func resolveModelDirectoryURL() -> URL? {
+        let fm = FileManager.default
+        let candidates = [
+            ProcessInfo.processInfo.environment["VOICEINPUT_SENSEVOICE_MODEL_DIR"],
+            "\(NSHomeDirectory())/Library/Application Support/Shandianshuo/models/sensevoice-small"
+        ].compactMap { $0 }.map(URL.init(fileURLWithPath:))
+
+        return candidates.first(where: { fm.fileExists(atPath: $0.path) })
+    }
+
+    private static func resolveHelperScriptURL() -> URL? {
+        let fm = FileManager.default
+        let cwd = URL(fileURLWithPath: fm.currentDirectoryPath)
+        let bundleScript = Bundle.main.resourceURL?.appendingPathComponent("sensevoice_transcribe.py")
+        let candidates = [
+            ProcessInfo.processInfo.environment["VOICEINPUT_SENSEVOICE_SCRIPT"].map(URL.init(fileURLWithPath:)),
+            bundleScript,
+            cwd.appendingPathComponent("scripts/sensevoice_transcribe.py")
+        ].compactMap { $0 }
+
+        return candidates.first(where: { fm.fileExists(atPath: $0.path) })
+    }
+
+    private static func resolvePythonURL() -> URL? {
+        let fm = FileManager.default
+        let cwd = URL(fileURLWithPath: fm.currentDirectoryPath)
+        let scriptURL = resolveHelperScriptURL()
+        let repoRoot = scriptURL?.deletingLastPathComponent().deletingLastPathComponent()
+        let candidates = [
+            ProcessInfo.processInfo.environment["VOICEINPUT_SENSEVOICE_PYTHON"].map(URL.init(fileURLWithPath:)),
+            repoRoot?.appendingPathComponent(".sensevoice-venv/bin/python"),
+            cwd.appendingPathComponent(".sensevoice-venv/bin/python")
+        ].compactMap { $0 }
+
+        return candidates.first(where: { fm.isExecutableFile(atPath: $0.path) })
     }
 }
 

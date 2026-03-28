@@ -1,7 +1,42 @@
 import AVFoundation
 import Foundation
 
-final class DictationPipeline {
+protocol DictationPipelineControlling: AnyObject, Sendable {
+    func start(
+        settings: AppSettings,
+        onStatus: @escaping @Sendable (String) -> Void,
+        onPreview: @escaping @Sendable (String) -> Void,
+        onSegments: @escaping @Sendable ([TranscriptSegment]) -> Void,
+        onActiveInputDevice: @escaping @Sendable (ActiveInputDeviceInfo) -> Void,
+        onFailure: @escaping @Sendable (Error) -> Void
+    ) async throws
+
+    func stop(
+        settings: AppSettings,
+        onStatus: @escaping @Sendable (String) -> Void,
+        onSegments: @escaping @Sendable ([TranscriptSegment]) -> Void
+    ) async throws -> DictationPipeline.StopResult
+
+    func cancelCurrentSession()
+    func setReRecognitionOrderMode(_ mode: ReRecognitionOrderMode)
+    func setExperimentPathEnabled(_ enabled: Bool)
+    func setReRecognitionExperimentTag(sampleLabel: ReRecognitionExperimentSampleLabel?, sessionTag: String?)
+    func saveLatestReRecognitionExperimentJSON(prettyPrinted: Bool) async throws -> URL
+    func reRecognitionExperimentExportDirectoryURL() throws -> URL
+}
+
+final class DictationPipeline: DictationPipelineControlling, @unchecked Sendable {
+    enum OnlineOptimizationStatus: Equatable {
+        case disabled
+        case optimized
+        case fallback(String)
+    }
+
+    struct StopResult {
+        let text: String
+        let onlineOptimizationStatus: OnlineOptimizationStatus
+    }
+
     enum DictationError: LocalizedError {
         case alreadyRunning
         case notRunning
@@ -44,7 +79,9 @@ final class DictationPipeline {
         settings: AppSettings,
         onStatus: @escaping @Sendable (String) -> Void,
         onPreview: @escaping @Sendable (String) -> Void,
-        onSegments: @escaping @Sendable ([TranscriptSegment]) -> Void = { _ in }
+        onSegments: @escaping @Sendable ([TranscriptSegment]) -> Void = { _ in },
+        onActiveInputDevice: @escaping @Sendable (ActiveInputDeviceInfo) -> Void = { _ in },
+        onFailure: @escaping @Sendable (Error) -> Void = { _ in }
     ) async throws {
         await awaitPendingReRecognitionIfNeeded()
         guard !running else { throw DictationError.alreadyRunning }
@@ -84,14 +121,28 @@ final class DictationPipeline {
         onStatus("使用苹果语音识别...")
 
         do {
-            let sessionAudio = try audioCaptureService.startSession { [weak self] buffer, _ in
-                self?.recognitionBackend?.appendAudioBuffer(buffer)
-            }
+            let sessionAudio = try audioCaptureService.startSession(
+                selection: settings.microphoneSelection,
+                onBuffer: { [weak self] buffer, _ in
+                    self?.recognitionBackend?.appendAudioBuffer(buffer)
+                },
+                onFailure: { [weak self] error in
+                    Task { @MainActor [weak self] in
+                        self?.running = false
+                        self?.recognitionBackend?.cancel()
+                        self?.recognitionBackend = nil
+                    }
+                    onFailure(error)
+                }
+            )
             lastSessionRecord = DictationSessionRecord(
                 id: sessionAudio.id,
                 transcript: latestSnapshot,
                 audio: sessionAudio
             )
+            if let inputDevice = sessionAudio.inputDevice {
+                onActiveInputDevice(inputDevice)
+            }
             await candidateStore.beginSession(id: sessionAudio.id)
         } catch {
             recognitionBackend?.cancel()
@@ -107,7 +158,7 @@ final class DictationPipeline {
         settings: AppSettings,
         onStatus: @escaping @Sendable (String) -> Void,
         onSegments: @escaping @Sendable ([TranscriptSegment]) -> Void = { _ in }
-    ) async throws -> String {
+    ) async throws -> StopResult {
         guard running else { throw DictationError.notRunning }
         guard let recognitionBackend else { throw DictationError.notRunning }
 
@@ -118,7 +169,7 @@ final class DictationPipeline {
         // but avoid making the stop action feel sluggish.
         try? await Task.sleep(nanoseconds: 180_000_000)
 
-        let sessionAudio = audioCaptureService.stopSession()
+        let sessionAudio = try audioCaptureService.stopSession()
         let finalizedSnapshot: RecognitionResultSnapshot
         do {
             finalizedSnapshot = try await recognitionBackend.finish()
@@ -140,10 +191,22 @@ final class DictationPipeline {
 
         let localText = processedSnapshot.displayText
         var finalText = localText
+        var onlineOptimizationStatus: OnlineOptimizationStatus = .disabled
         if !localText.isEmpty, settings.onlineOptimizationEnabled {
             onStatus("在线纠错优化中...")
-            let optimized = try await optimizer.optimize(localText, settings: settings, correctionPipeline: correctionPipeline)
-            finalText = correctionPipeline.applyLocalCorrections(to: optimized)
+            let outcome = await optimizer.optimizeWithDiagnostics(localText, settings: settings, correctionPipeline: correctionPipeline)
+            switch outcome {
+            case .notEnabled:
+                onlineOptimizationStatus = .disabled
+            case let .optimized(optimized):
+                finalText = correctionPipeline.applyLocalCorrections(to: optimized)
+                onlineOptimizationStatus = .optimized
+            case let .fallbackToLocal(result, reason):
+                finalText = correctionPipeline.applyLocalCorrections(to: result)
+                onlineOptimizationStatus = .fallback(reason)
+            }
+        } else if settings.onlineOptimizationEnabled {
+            onlineOptimizationStatus = .fallback("首轮转写为空，未执行在线纠错。")
         }
 
         let finalSnapshot = RecognitionResultSnapshot(
@@ -163,7 +226,7 @@ final class DictationPipeline {
         lastSessionRecord = sessionRecord
         scheduleReRecognition(sessionRecord: sessionRecord, settings: settings)
 
-        return finalText
+        return StopResult(text: finalText, onlineOptimizationStatus: onlineOptimizationStatus)
     }
 
     func latestSegments() -> [TranscriptSegment] {
@@ -411,7 +474,8 @@ final class DictationPipeline {
             createdAt: Date(),
             sampleRate: format.sampleRate,
             channelCount: format.channelCount,
-            duration: duration
+            duration: duration,
+            inputDevice: nil
         )
     }
 
@@ -704,8 +768,6 @@ final class DictationPipeline {
         pendingReRecognitionTask = nil
     }
 }
-
-extension DictationPipeline: @unchecked Sendable {}
 
 private extension String {
     var nilIfEmpty: String? {

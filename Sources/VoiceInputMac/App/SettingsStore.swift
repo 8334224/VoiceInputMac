@@ -4,6 +4,12 @@ import SwiftUI
 
 @MainActor
 final class SettingsStore: ObservableObject {
+    struct MicrophoneSelectionStatus: Equatable {
+        let title: String
+        let detail: String
+        let isError: Bool
+    }
+
     enum OnlineTestState {
         case idle
         case testing
@@ -35,15 +41,32 @@ final class SettingsStore: ObservableObject {
         }
     }
     @Published private(set) var onlineTestState: OnlineTestState = .idle
+    @Published private(set) var microphoneDevices: [MicrophoneDeviceInfo] = []
+    @Published private(set) var microphoneStatus: MicrophoneSelectionStatus = .init(
+        title: "使用系统默认输入设备",
+        detail: "开始听写时跟随当前系统默认麦克风。",
+        isError: false
+    )
 
     private let defaultsKey = "voice_input_mac_settings"
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private let userDefaults: UserDefaults
     private let optimizer = OnlineOptimizer()
+    private let microphoneDeviceProvider: MicrophoneDeviceProviding
+    private let microphoneDeviceChangeMonitor: MicrophoneDeviceChangeObserving
+    private let defaultInputDeviceChangeMonitor: DefaultInputDeviceChangeObserving
 
-    init(userDefaults: UserDefaults = .standard) {
+    init(
+        userDefaults: UserDefaults = .standard,
+        microphoneDeviceProvider: MicrophoneDeviceProviding = MicrophoneDeviceService(),
+        microphoneDeviceChangeMonitor: MicrophoneDeviceChangeObserving = AVFoundationMicrophoneDeviceChangeMonitor(),
+        defaultInputDeviceChangeMonitor: DefaultInputDeviceChangeObserving? = nil
+    ) {
         self.userDefaults = userDefaults
+        self.microphoneDeviceProvider = microphoneDeviceProvider
+        self.microphoneDeviceChangeMonitor = microphoneDeviceChangeMonitor
+        self.defaultInputDeviceChangeMonitor = defaultInputDeviceChangeMonitor ?? CoreAudioDefaultInputDeviceChangeMonitor(deviceProvider: microphoneDeviceProvider)
 
         if let data = userDefaults.data(forKey: defaultsKey),
            let stored = try? decoder.decode(AppSettings.self, from: data) {
@@ -53,13 +76,30 @@ final class SettingsStore: ObservableObject {
                normalized.requestTimeoutSeconds == 4 {
                 normalized.requestTimeoutSeconds = 8
             }
+            if normalized.onlineSoftTimeoutSeconds <= 0 {
+                normalized.onlineSoftTimeoutSeconds = 8
+            }
+            if normalized.requestTimeoutSeconds < normalized.onlineSoftTimeoutSeconds {
+                normalized.requestTimeoutSeconds = normalized.onlineSoftTimeoutSeconds
+            }
+            normalized = Self.migrateDefaultOnlineProvider(in: normalized)
+            normalized = Self.migrateBundledPromptTemplates(in: normalized)
             normalized = Self.ensureDefaultPersonalRules(in: normalized)
+            normalized = Self.normalizeMicrophoneSelection(in: normalized)
             settings = normalized
         } else {
-            settings = Self.ensureDefaultPersonalRules(in: AppSettings())
+            settings = Self.normalizeMicrophoneSelection(in: Self.ensureDefaultPersonalRules(in: AppSettings()))
         }
 
+        reloadMicrophoneDevices()
+        startObservingMicrophoneDeviceChanges()
+        startObservingDefaultInputDeviceChanges()
         save()
+    }
+
+    deinit {
+        microphoneDeviceChangeMonitor.stopObserving()
+        defaultInputDeviceChangeMonitor.stopObserving()
     }
 
     func binding<Value>(for keyPath: WritableKeyPath<AppSettings, Value>) -> Binding<Value> {
@@ -98,14 +138,23 @@ final class SettingsStore: ObservableObject {
         settings.onlineProvider = provider
         settings.apiEndpoint = provider.defaultEndpoint
         settings.modelName = provider.defaultModel
+        if settings.requestTimeoutSeconds < settings.onlineSoftTimeoutSeconds {
+            settings.requestTimeoutSeconds = settings.onlineSoftTimeoutSeconds
+        }
     }
 
     func applyOnlineProviderDefaults() {
         let provider = settings.onlineProvider
         settings.apiEndpoint = provider.defaultEndpoint
         settings.modelName = provider.defaultModel
-        if provider == .volcengineCodingPlan, settings.requestTimeoutSeconds < 8 {
+        if provider == .volcengineCodingPlan || provider == .googleGemini, settings.requestTimeoutSeconds < 8 {
             settings.requestTimeoutSeconds = 8
+        }
+        if settings.onlineSoftTimeoutSeconds < 8 {
+            settings.onlineSoftTimeoutSeconds = 8
+        }
+        if settings.requestTimeoutSeconds < settings.onlineSoftTimeoutSeconds {
+            settings.requestTimeoutSeconds = settings.onlineSoftTimeoutSeconds
         }
     }
 
@@ -155,6 +204,64 @@ final class SettingsStore: ObservableObject {
         }
     }
 
+    func reloadMicrophoneDevices() {
+        reloadMicrophoneDevices(reason: "manual")
+    }
+
+    private func reloadMicrophoneDevices(reason: String) {
+        print("[SettingsStore] reloading microphone devices reason=\(reason)")
+        do {
+            microphoneDevices = try microphoneDeviceProvider.availableInputDevices()
+        } catch {
+            microphoneDevices = []
+            print("[SettingsStore] microphone device reload failed: \(error.localizedDescription)")
+        }
+
+        updateMicrophoneStatus()
+    }
+
+    func useSystemDefaultMicrophone() {
+        settings.microphoneSelectionMode = .systemDefault
+        updateMicrophoneStatus()
+    }
+
+    func selectMicrophoneDevice(id: String) {
+        let trimmedID = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedID.isEmpty else {
+            useSystemDefaultMicrophone()
+            return
+        }
+
+        let matchedDevice = microphoneDevices.first { $0.id == trimmedID }
+        settings.microphoneSelectionMode = .specificDevice
+        settings.selectedMicrophoneID = trimmedID
+        if let matchedDevice {
+            settings.selectedMicrophoneName = matchedDevice.name
+        }
+        updateMicrophoneStatus()
+    }
+
+    func microphoneMenuLabel() -> String {
+        switch settings.microphoneSelectionMode {
+        case .systemDefault:
+            if let device = microphoneDeviceProvider.systemDefaultInputDevice() {
+                return "系统默认（\(device.name)）"
+            }
+            return "系统默认"
+        case .specificDevice:
+            return selectedMicrophoneDisplayName()
+        }
+    }
+
+    func selectedMicrophoneDisplayName() -> String {
+        if let matchedDevice = microphoneDevices.first(where: { $0.id == settings.selectedMicrophoneID }) {
+            return matchedDevice.name
+        }
+
+        let fallback = settings.selectedMicrophoneName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return fallback.isEmpty ? "未指定设备" : fallback
+    }
+
     private func save() {
         guard let data = try? encoder.encode(settings) else { return }
         userDefaults.set(data, forKey: defaultsKey)
@@ -165,6 +272,10 @@ final class SettingsStore: ObservableObject {
 
         if endpoint.contains("volces.com/api/coding/v3") {
             return .volcengineCodingPlan
+        }
+
+        if endpoint.contains("generativelanguage.googleapis.com") {
+            return .googleGemini
         }
 
         if endpoint.contains("api.openai.com")
@@ -187,5 +298,122 @@ final class SettingsStore: ObservableObject {
 
         updated.replacementRulesText = lines.joined(separator: "\n")
         return updated
+    }
+
+    private static func migrateDefaultOnlineProvider(in settings: AppSettings) -> AppSettings {
+        var updated = settings
+
+        let endpoint = updated.apiEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = updated.modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let isLegacyDefaultVolcengine =
+            updated.onlineProvider == .volcengineCodingPlan &&
+            endpoint == OnlineProvider.volcengineCodingPlan.defaultEndpoint &&
+            model == OnlineProvider.volcengineCodingPlan.defaultModel
+
+        if isLegacyDefaultVolcengine {
+            updated.onlineProvider = .googleGemini
+            updated.apiEndpoint = OnlineProvider.googleGemini.defaultEndpoint
+            updated.modelName = OnlineProvider.googleGemini.defaultModel
+        }
+
+        return updated
+    }
+
+    private static func migrateBundledPromptTemplates(in settings: AppSettings) -> AppSettings {
+        var updated = settings
+
+        if updated.speechMode == .general,
+           isLegacyGeneralSystemPrompt(updated.optimizerSystemPromptTemplate) {
+            updated.optimizerSystemPromptTemplate = BuiltInFujianPreset.systemPromptTemplate(for: .general)
+        }
+
+        return updated
+    }
+
+    private func updateMicrophoneStatus() {
+        switch settings.microphoneSelectionMode {
+        case .systemDefault:
+            if let device = microphoneDeviceProvider.systemDefaultInputDevice() {
+                microphoneStatus = .init(
+                    title: "使用系统默认输入设备",
+                    detail: "当前默认设备：\(device.name)。开始听写时会自动跟随系统设置。",
+                    isError: false
+                )
+            } else {
+                microphoneStatus = .init(
+                    title: "使用系统默认输入设备",
+                    detail: "当前没有检测到可用麦克风，连接设备后可直接重试。",
+                    isError: true
+                )
+            }
+        case .specificDevice:
+            let selectedID = settings.selectedMicrophoneID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !selectedID.isEmpty else {
+                microphoneStatus = .init(
+                    title: "未指定具体设备",
+                    detail: "当前配置为空，已回退为系统默认输入设备。",
+                    isError: true
+                )
+                return
+            }
+
+            if let device = microphoneDevices.first(where: { $0.id == selectedID }) {
+                microphoneStatus = .init(
+                    title: "已指定麦克风",
+                    detail: "当前选择：\(device.name)。修改后会在下次开始听写时生效。",
+                    isError: false
+                )
+            } else {
+                let name = selectedMicrophoneDisplayName()
+                microphoneStatus = .init(
+                    title: "所选麦克风不可用",
+                    detail: "“\(name)” 当前不可用或已移除。你可以继续保留该选择，或改回系统默认。",
+                    isError: true
+                )
+            }
+        }
+    }
+
+    private func startObservingMicrophoneDeviceChanges() {
+        microphoneDeviceChangeMonitor.startObserving { [weak self] event in
+            self?.reloadMicrophoneDevices(reason: "hotplug:\(event.logDescription)")
+        }
+    }
+
+    private func startObservingDefaultInputDeviceChanges() {
+        defaultInputDeviceChangeMonitor.startObserving { [weak self] event in
+            self?.reloadMicrophoneDevices(reason: "default-input:\(event.logDescription)")
+        }
+    }
+
+    private static func normalizeMicrophoneSelection(in settings: AppSettings) -> AppSettings {
+        var updated = settings
+        let selectedID = updated.selectedMicrophoneID.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if updated.microphoneSelectionMode == .specificDevice, selectedID.isEmpty {
+            updated.microphoneSelectionMode = .systemDefault
+            updated.selectedMicrophoneID = ""
+            updated.selectedMicrophoneName = ""
+        } else {
+            updated.selectedMicrophoneID = selectedID
+            updated.selectedMicrophoneName = updated.selectedMicrophoneName.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        return updated
+    }
+
+    private static func isLegacyGeneralSystemPrompt(_ template: String) -> Bool {
+        let normalized = template.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if normalized.isEmpty { return false }
+        if normalized.contains("Role: 你是 Typeless app 的极简核心") { return false }
+
+        let legacyPrefixes = [
+            "你是中文语音转写纠错器。",
+            "任务是把语音识别结果修正成最终可直接发送或输入的文本。"
+        ]
+
+        return legacyPrefixes.contains { normalized.hasPrefix($0) }
     }
 }

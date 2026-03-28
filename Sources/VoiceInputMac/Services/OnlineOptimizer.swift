@@ -1,6 +1,12 @@
 import Foundation
 
 struct OnlineOptimizer {
+    enum AttemptResult {
+        case notEnabled(String)
+        case optimized(String)
+        case fallbackToLocal(String, reason: String)
+    }
+
     enum OptimizationError: LocalizedError {
         case invalidConfiguration(String)
         case invalidEndpoint
@@ -48,20 +54,71 @@ struct OnlineOptimizer {
         let choices: [Choice]
     }
 
+    struct GeminiRequestBody: Encodable {
+        struct Part: Encodable {
+            let text: String
+        }
+
+        struct Content: Encodable {
+            let role: String
+            let parts: [Part]
+        }
+
+        struct SystemInstruction: Encodable {
+            let parts: [Part]
+        }
+
+        struct GenerationConfig: Encodable {
+            let temperature: Double?
+        }
+
+        let systemInstruction: SystemInstruction?
+        let contents: [Content]
+        let generationConfig: GenerationConfig?
+    }
+
+    struct GeminiResponseBody: Decodable {
+        struct Candidate: Decodable {
+            struct Content: Decodable {
+                struct Part: Decodable {
+                    let text: String?
+                }
+
+                let parts: [Part]?
+            }
+
+            let content: Content?
+        }
+
+        let candidates: [Candidate]?
+    }
+
     func optimize(_ text: String, settings: AppSettings, correctionPipeline: TextCorrectionPipeline) async throws -> String {
-        guard settings.onlineOptimizationEnabled else { return text }
+        switch await optimizeWithDiagnostics(text, settings: settings, correctionPipeline: correctionPipeline) {
+        case let .notEnabled(result), let .optimized(result), let .fallbackToLocal(result, _):
+            return result
+        }
+    }
 
-        return await withTaskGroup(of: String.self) { group in
+    func optimizeWithDiagnostics(_ text: String, settings: AppSettings, correctionPipeline: TextCorrectionPipeline) async -> AttemptResult {
+        guard settings.onlineOptimizationEnabled else { return .notEnabled(text) }
+
+        return await withTaskGroup(of: AttemptResult.self) { group in
             group.addTask {
-                (try? await requestOptimizedText(text, settings: settings, correctionPipeline: correctionPipeline)) ?? text
+                do {
+                    let optimized = try await requestOptimizedText(text, settings: settings, correctionPipeline: correctionPipeline)
+                    return .optimized(optimized)
+                } catch {
+                    return .fallbackToLocal(text, reason: error.localizedDescription)
+                }
             }
             group.addTask {
-                let timeout = UInt64(Self.softTimeoutSeconds(for: settings.onlineProvider) * 1_000_000_000)
+                let timeout = UInt64(Self.softTimeoutSeconds(for: settings) * 1_000_000_000)
                 try? await Task.sleep(nanoseconds: timeout)
-                return text
+                return .fallbackToLocal(text, reason: "在线纠错超时，已回退到本地结果。")
             }
 
-            let result = await group.next() ?? text
+            let result = await group.next() ?? .fallbackToLocal(text, reason: "在线纠错未返回结果，已回退到本地结果。")
             group.cancelAll()
             return result
         }
@@ -155,9 +212,25 @@ struct OnlineOptimizer {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = settings.requestTimeoutSeconds
-        request.httpBody = try JSONEncoder().encode(body)
+
+        if settings.onlineProvider == .googleGemini {
+            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            let currentPath = components?.path ?? ""
+            components?.path = normalizedGeminiPath(currentPath: currentPath, modelName: modelName)
+            let queryItems = components?.queryItems ?? []
+            components?.queryItems = queryItems + [URLQueryItem(name: "key", value: apiKey)]
+
+            guard let geminiURL = components?.url else {
+                throw OptimizationError.invalidEndpoint
+            }
+
+            request.url = geminiURL
+            request.httpBody = try JSONEncoder().encode(geminiBody(from: messages))
+        } else {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            request.httpBody = try JSONEncoder().encode(body)
+        }
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
@@ -166,19 +239,42 @@ struct OnlineOptimizer {
             throw serverError(from: data, response: response)
         }
 
-        let decoded: ResponseBody
-        do {
-            decoded = try JSONDecoder().decode(ResponseBody.self, from: data)
-        } catch {
-            throw OptimizationError.invalidResponse
-        }
+        if settings.onlineProvider == .googleGemini {
+            let decoded: GeminiResponseBody
+            do {
+                decoded = try JSONDecoder().decode(GeminiResponseBody.self, from: data)
+            } catch {
+                throw OptimizationError.invalidResponse
+            }
 
-        guard let optimized = decoded.choices.first?.message.content?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !optimized.isEmpty else {
-            throw OptimizationError.emptyResponse
-        }
+            let optimized = decoded.candidates?
+                .first?
+                .content?
+                .parts?
+                .compactMap(\.text)
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        return optimized
+            guard let optimized, !optimized.isEmpty else {
+                throw OptimizationError.emptyResponse
+            }
+
+            return optimized
+        } else {
+            let decoded: ResponseBody
+            do {
+                decoded = try JSONDecoder().decode(ResponseBody.self, from: data)
+            } catch {
+                throw OptimizationError.invalidResponse
+            }
+
+            guard let optimized = decoded.choices.first?.message.content?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !optimized.isEmpty else {
+                throw OptimizationError.emptyResponse
+            }
+
+            return optimized
+        }
     }
 
     private func renderTemplate(_ template: String, replacements: [String: String]) -> String {
@@ -209,13 +305,51 @@ struct OnlineOptimizer {
         return 0.1
     }
 
-    private static func softTimeoutSeconds(for provider: OnlineProvider) -> Double {
-        switch provider {
-        case .volcengineCodingPlan:
-            return 1.4
-        case .openAICompatible:
-            return 1.8
+    private func geminiBody(from messages: [RequestBody.Message]) -> GeminiRequestBody {
+        let systemMessage = messages.first(where: { $0.role == "system" })
+        let userContents = messages
+            .filter { $0.role != "system" }
+            .map { message in
+                GeminiRequestBody.Content(
+                    role: message.role == "assistant" ? "model" : "user",
+                    parts: [.init(text: message.content)]
+                )
+            }
+
+        return GeminiRequestBody(
+            systemInstruction: systemMessage.map {
+                .init(parts: [.init(text: $0.content)])
+            },
+            contents: userContents,
+            generationConfig: .init(temperature: 0.1)
+        )
+    }
+
+    private func normalizedGeminiPath(currentPath: String, modelName: String) -> String {
+        if currentPath.contains(":generateContent") {
+            return currentPath
         }
+
+        let trimmed = currentPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if trimmed.isEmpty || trimmed == "v1beta" {
+            return "/v1beta/models/\(modelName):generateContent"
+        }
+
+        if trimmed.hasSuffix("/models") {
+            return "/\(trimmed)/\(modelName):generateContent"
+        }
+
+        if trimmed.contains("/models/") {
+            return "/\(trimmed)"
+        }
+
+        return "/v1beta/models/\(modelName):generateContent"
+    }
+
+    private static func softTimeoutSeconds(for settings: AppSettings) -> Double {
+        let configured = max(1.0, settings.onlineSoftTimeoutSeconds)
+        let requestTimeout = max(1.0, settings.requestTimeoutSeconds)
+        return min(configured, requestTimeout)
     }
 
     private func serverError(from data: Data, response: URLResponse) -> OptimizationError {

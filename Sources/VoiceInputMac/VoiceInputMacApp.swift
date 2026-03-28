@@ -25,6 +25,7 @@ struct VoiceInputMacApp: App {
         Settings {
             SettingsView()
                 .environmentObject(settingsStore)
+                .environmentObject(appState)
         }
     }
 }

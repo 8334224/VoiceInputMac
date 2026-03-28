@@ -34,6 +34,10 @@ final class SpeechHUDController {
 
     private func hide() {
         panel?.orderOut(nil)
+        panel?.contentViewController = nil
+        panel?.close()
+        panel = nil
+        hostingController = nil
     }
 
     private func ensurePanel(appState: AppState, transcript: String) -> NSPanel {

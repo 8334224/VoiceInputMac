@@ -10,6 +10,7 @@ ZIP_PATH="$ROOT_DIR/dist/${APP_NAME}-${VERSION}-macOS.zip"
 CACHE_DIR="$ROOT_DIR/.codex-cache"
 ICON_SCRIPT="$ROOT_DIR/scripts/generate_app_icon.swift"
 ICNS_PATH="$ROOT_DIR/Resources/VoiceInputMac.icns"
+SENSEVOICE_HELPER_SCRIPT="$ROOT_DIR/scripts/sensevoice_transcribe.py"
 APP_SIGN_IDENTITY="${APP_SIGN_IDENTITY:--}"
 
 cd "$ROOT_DIR"
@@ -36,6 +37,10 @@ mkdir -p "$APP_DIR/Contents/Resources"
 cp "$BIN_PATH" "$APP_DIR/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_DIR/Contents/MacOS/$APP_NAME"
 cp "$ICNS_PATH" "$APP_DIR/Contents/Resources/${APP_NAME}.icns"
+if [[ -f "$SENSEVOICE_HELPER_SCRIPT" ]]; then
+  cp "$SENSEVOICE_HELPER_SCRIPT" "$APP_DIR/Contents/Resources/sensevoice_transcribe.py"
+  chmod +x "$APP_DIR/Contents/Resources/sensevoice_transcribe.py"
+fi
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

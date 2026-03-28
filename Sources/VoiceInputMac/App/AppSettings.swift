@@ -4,6 +4,9 @@ struct AppSettings: Codable {
     var localeIdentifier: String
     var autoPaste: Bool
     var preserveClipboard: Bool
+    var microphoneSelectionMode: MicrophoneSelectionMode
+    var selectedMicrophoneID: String
+    var selectedMicrophoneName: String
     var hotKey: HotKeyDescriptor
     var speechMode: SpeechMode
     var onlineOptimizationEnabled: Bool
@@ -18,16 +21,20 @@ struct AppSettings: Codable {
     var extraPrompt: String
     var optimizerSystemPromptTemplate: String
     var optimizerUserPromptTemplate: String
+    var onlineSoftTimeoutSeconds: Double
     var requestTimeoutSeconds: Double
 
     init() {
         localeIdentifier = "zh-CN"
         autoPaste = true
         preserveClipboard = true
+        microphoneSelectionMode = .systemDefault
+        selectedMicrophoneID = ""
+        selectedMicrophoneName = ""
         hotKey = .default
         speechMode = .general
         onlineOptimizationEnabled = false
-        onlineProvider = .volcengineCodingPlan
+        onlineProvider = .googleGemini
         apiEndpoint = onlineProvider.defaultEndpoint
         apiKey = ""
         modelName = onlineProvider.defaultModel
@@ -38,6 +45,7 @@ struct AppSettings: Codable {
         extraPrompt = ""
         optimizerSystemPromptTemplate = BuiltInFujianPreset.systemPromptTemplate(for: .general)
         optimizerUserPromptTemplate = BuiltInFujianPreset.userPromptTemplate(for: .general)
+        onlineSoftTimeoutSeconds = 8.0
         requestTimeoutSeconds = 8.0
     }
 
@@ -47,6 +55,9 @@ struct AppSettings: Codable {
         localeIdentifier = try container.decodeIfPresent(String.self, forKey: .localeIdentifier) ?? defaults.localeIdentifier
         autoPaste = try container.decodeIfPresent(Bool.self, forKey: .autoPaste) ?? defaults.autoPaste
         preserveClipboard = try container.decodeIfPresent(Bool.self, forKey: .preserveClipboard) ?? defaults.preserveClipboard
+        microphoneSelectionMode = try container.decodeIfPresent(MicrophoneSelectionMode.self, forKey: .microphoneSelectionMode) ?? defaults.microphoneSelectionMode
+        selectedMicrophoneID = try container.decodeIfPresent(String.self, forKey: .selectedMicrophoneID) ?? defaults.selectedMicrophoneID
+        selectedMicrophoneName = try container.decodeIfPresent(String.self, forKey: .selectedMicrophoneName) ?? defaults.selectedMicrophoneName
         hotKey = try container.decodeIfPresent(HotKeyDescriptor.self, forKey: .hotKey) ?? defaults.hotKey
         speechMode = try container.decodeIfPresent(SpeechMode.self, forKey: .speechMode) ?? defaults.speechMode
         onlineOptimizationEnabled = try container.decodeIfPresent(Bool.self, forKey: .onlineOptimizationEnabled) ?? defaults.onlineOptimizationEnabled
@@ -61,6 +72,15 @@ struct AppSettings: Codable {
         extraPrompt = try container.decodeIfPresent(String.self, forKey: .extraPrompt) ?? defaults.extraPrompt
         optimizerSystemPromptTemplate = try container.decodeIfPresent(String.self, forKey: .optimizerSystemPromptTemplate) ?? BuiltInFujianPreset.systemPromptTemplate(for: speechMode)
         optimizerUserPromptTemplate = try container.decodeIfPresent(String.self, forKey: .optimizerUserPromptTemplate) ?? BuiltInFujianPreset.userPromptTemplate(for: speechMode)
+        onlineSoftTimeoutSeconds = try container.decodeIfPresent(Double.self, forKey: .onlineSoftTimeoutSeconds) ?? defaults.onlineSoftTimeoutSeconds
         requestTimeoutSeconds = try container.decodeIfPresent(Double.self, forKey: .requestTimeoutSeconds) ?? defaults.requestTimeoutSeconds
+    }
+
+    var microphoneSelection: MicrophoneSelectionConfiguration {
+        MicrophoneSelectionConfiguration(
+            mode: microphoneSelectionMode,
+            selectedMicrophoneID: selectedMicrophoneID,
+            selectedMicrophoneName: selectedMicrophoneName
+        )
     }
 }

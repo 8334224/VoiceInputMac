@@ -4,6 +4,9 @@ import Foundation
 
 @MainActor
 final class AppState: ObservableObject {
+    typealias PermissionsRequester = () async -> PermissionsCoordinator.Snapshot
+    typealias AccessibilityTrustChecker = (Bool) -> Bool
+
     enum SpeechHUDPhase: Equatable {
         case hidden
         case recording
@@ -19,6 +22,8 @@ final class AppState: ObservableObject {
     @Published var accessibilityWarning = ""
     @Published var hotKeyWarning = ""
     @Published var recoveryActionTitle = ""
+    @Published var completionDetail = ""
+    @Published var activeInputDeviceName = ""
     @Published var speechHUDPhase: SpeechHUDPhase = .hidden
     @Published var experimentOrderMode: ReRecognitionOrderMode = .blended
     @Published var experimentSampleLabel: ReRecognitionExperimentSampleLabel?
@@ -32,14 +37,24 @@ final class AppState: ObservableObject {
     }
 
     private let settingsStore: SettingsStore
-    private let dictationPipeline = DictationPipeline()
+    private let dictationPipeline: DictationPipelineControlling
     private let textInjector = TextInjector()
     private var hotKeyController: HotKeyController?
     private var cancellables: Set<AnyCancellable> = []
     private var recoveryTarget: PermissionsCoordinator.SettingsTarget?
+    private let requestPermissions: PermissionsRequester
+    private let accessibilityTrustChecker: AccessibilityTrustChecker
 
-    init(settingsStore: SettingsStore) {
+    init(
+        settingsStore: SettingsStore,
+        dictationPipeline: DictationPipelineControlling = DictationPipeline(),
+        requestPermissions: @escaping PermissionsRequester = { await PermissionsCoordinator.requestAll() },
+        accessibilityTrustChecker: @escaping AccessibilityTrustChecker = { AccessibilityCoordinator.isTrusted(prompt: $0) }
+    ) {
         self.settingsStore = settingsStore
+        self.dictationPipeline = dictationPipeline
+        self.requestPermissions = requestPermissions
+        self.accessibilityTrustChecker = accessibilityTrustChecker
         self.isExperimentUIEnabled =
             ProcessInfo.processInfo.environment["VOICEINPUTMAC_ENABLE_EXPERIMENTS"] == "1" ||
             ProcessInfo.processInfo.arguments.contains("--enable-experiments")
@@ -73,6 +88,8 @@ final class AppState: ObservableObject {
         lastError = ""
         accessibilityWarning = ""
         recoveryActionTitle = ""
+        completionDetail = ""
+        activeInputDeviceName = ""
         recoveryTarget = nil
         transcriptPreview = ""
         finalTranscript = ""
@@ -86,7 +103,7 @@ final class AppState: ObservableObject {
             dictationPipeline.setExperimentPathEnabled(false)
         }
 
-        let permissions = await PermissionsCoordinator.requestAll()
+        let permissions = await requestPermissions()
         guard permissions.allAuthorized else {
             statusText = "权限不足"
             lastError = permissions.recoveryMessage
@@ -96,7 +113,7 @@ final class AppState: ObservableObject {
             return
         }
 
-        if settingsStore.settings.autoPaste, !AccessibilityCoordinator.isTrusted(prompt: false) {
+        if settingsStore.settings.autoPaste, !accessibilityTrustChecker(false) {
             accessibilityWarning = "自动粘贴需要在 系统设置 > 隐私与安全性 > 辅助功能 中允许本应用。"
         }
 
@@ -112,10 +129,18 @@ final class AppState: ObservableObject {
                 Task { @MainActor in
                     self?.transcriptSegments = segments
                 }
+            }, onActiveInputDevice: { [weak self] device in
+                Task { @MainActor in
+                    self?.applyActiveInputDevice(device)
+                }
+            }, onFailure: { [weak self] error in
+                Task { @MainActor [weak self] in
+                    self?.handlePipelineFailure(error, duringStart: false)
+                }
             })
             isRecording = true
             speechHUDPhase = .recording
-            statusText = "正在听写..."
+            updateRecordingStatusText()
         } catch {
             handlePipelineFailure(error, duringStart: true)
         }
@@ -128,20 +153,32 @@ final class AppState: ObservableObject {
         statusText = "正在收尾..."
 
         do {
-            let text = try await dictationPipeline.stop(settings: settingsStore.settings, onStatus: { [weak self] text in
+            let result = try await dictationPipeline.stop(settings: settingsStore.settings, onStatus: { [weak self] text in
                 Task { @MainActor in self?.statusText = text }
             }, onSegments: { [weak self] segments in
                 Task { @MainActor in
                     self?.transcriptSegments = segments
                 }
             })
+            let text = result.text
             finalTranscript = text
             transcriptPreview = text
-            statusText = "已完成"
+            switch result.onlineOptimizationStatus {
+            case .disabled:
+                statusText = "已完成"
+                completionDetail = ""
+            case .optimized:
+                statusText = "已完成（已使用在线纠错）"
+                completionDetail = "本次结果已使用在线纠错。"
+            case let .fallback(reason):
+                statusText = "已完成（已回退本地结果）"
+                completionDetail = reason
+            }
             speechHUDPhase = .hidden
+            clearActiveInputDevice()
 
             if settingsStore.settings.autoPaste {
-                let trusted = AccessibilityCoordinator.isTrusted(prompt: false)
+                let trusted = accessibilityTrustChecker(false)
                 if trusted {
                     accessibilityWarning = ""
                     textInjector.paste(text, preserveClipboard: settingsStore.settings.preserveClipboard)
@@ -161,6 +198,8 @@ final class AppState: ObservableObject {
         transcriptSegments = []
         lastError = ""
         recoveryActionTitle = ""
+        completionDetail = ""
+        clearActiveInputDevice()
         recoveryTarget = nil
         lastExperimentExportPath = ""
         statusText = "就绪"
@@ -180,6 +219,7 @@ final class AppState: ObservableObject {
         dictationPipeline.cancelCurrentSession()
         isRecording = false
         speechHUDPhase = .hidden
+        clearActiveInputDevice()
         NSApplication.shared.terminate(nil)
     }
 
@@ -215,15 +255,48 @@ final class AppState: ObservableObject {
         hotKeyWarning = hotKeyController?.update(descriptor: descriptor) ?? ""
     }
 
+    func applyActiveInputDevice(_ device: ActiveInputDeviceInfo) {
+        activeInputDeviceName = device.name
+        updateRecordingStatusText()
+    }
+
+    func clearActiveInputDevice() {
+        activeInputDeviceName = ""
+    }
+
+    private func updateRecordingStatusText() {
+        if isRecording, !activeInputDeviceName.isEmpty {
+            statusText = "正在通过\(activeInputDeviceName)听写..."
+        } else if isRecording {
+            statusText = "正在听写..."
+        }
+    }
+
     private func handlePipelineFailure(_ error: Error, duringStart: Bool) {
         isRecording = false
         speechHUDPhase = .hidden
+        clearActiveInputDevice()
         recoveryActionTitle = ""
+        completionDetail = ""
         recoveryTarget = nil
 
         if let captureError = error as? AudioCaptureService.AudioCaptureError {
-            statusText = duringStart ? "麦克风不可用" : "录音已中断"
-            lastError = "\(captureError.localizedDescription) 修复后可直接再次开始听写。"
+            switch captureError {
+            case .selectedInputDeviceUnavailable:
+                statusText = "所选麦克风不可用"
+                lastError = "\(captureError.localizedDescription) 请在设置页改回系统默认，或重新连接该设备后重试。"
+            case .selectedInputDevicePermissionDenied:
+                statusText = "所选麦克风无权限"
+                lastError = "\(captureError.localizedDescription) 请在系统设置中允许麦克风权限后重试。"
+                recoveryTarget = .microphone
+                recoveryActionTitle = "打开麦克风设置"
+            case .selectedInputDeviceStartFailed:
+                statusText = "所选麦克风启动失败"
+                lastError = "\(captureError.localizedDescription) 你可以检查设备连接、切换输入设备后再次开始听写。"
+            default:
+                statusText = duringStart ? "麦克风不可用" : "录音已中断"
+                lastError = "\(captureError.localizedDescription) 修复后可直接再次开始听写。"
+            }
             if captureError == .noInputDevice || captureError == .cannotStartEngine {
                 recoveryTarget = .microphone
                 recoveryActionTitle = "打开麦克风设置"
