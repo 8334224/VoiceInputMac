@@ -12,6 +12,9 @@ VoiceInputMac currently provides:
 
 - a macOS menu bar app with global hotkey start/stop dictation
 - local microphone capture with session-level audio caching
+- manual microphone device selection
+- automatic microphone list refresh on hotplug and default-input changes
+- visible recording-session input device status in the menu bar and settings
 - structured transcript segments instead of plain text only
 - rule-based suspicious-span detection
 - local clip extraction for partial re-recognition
@@ -26,11 +29,16 @@ The current recognition stack is split into reusable layers:
 
 - `AudioCaptureService`
   - microphone capture
+  - explicit input-device binding without changing the system-wide default input
   - session audio caching
   - clip extraction by time range
+- `MicrophoneDeviceService` / device monitors
+  - input-device enumeration
+  - hotplug refresh
+  - system default input change refresh
 - `RecognitionBackend`
   - Apple Speech for the main dictation path
-  - Apple Speech on-device and WhisperKit for experimental local re-recognition
+  - Apple Speech on-device, WhisperKit, and SenseVoice-Small for experimental local re-recognition / baseline comparison
 - `TextPostProcessor`
   - local phrase correction
   - conservative post-processing
@@ -78,8 +86,11 @@ What is already implemented:
 - settings storage
 - global hotkey control
 - microphone permissions and accessibility flow
+- microphone device selection with persistence and restart restore
+- microphone hotplug refresh and system default input auto-refresh
+- visible active input device name while recording
 - Apple Speech main dictation path
-- experimental WhisperKit local re-recognition path
+- experimental WhisperKit and SenseVoice-Small local paths
 - structured JSON export for repeatable experiments
 
 What is still evolving:
@@ -123,6 +134,13 @@ The app requires:
 
 Accessibility is used for text insertion into the active application.
 
+The Beta build also supports:
+
+- choosing a specific microphone instead of always following the system default
+- automatically detecting microphone plug/unplug events
+- automatically refreshing when macOS switches the default input device
+- showing which input device the current recording session is actually using
+
 ## Fixed-audio experiment entry
 
 The repository also includes a minimal fixed-audio experiment entry for repeatable testing.
@@ -148,6 +166,7 @@ Near-term priorities:
 - improve Chinese first-pass error detection
 - improve candidate evaluation for near-correct Chinese outputs
 - expand fixed-audio regression testing
+- compare Apple Speech and SenseVoice-Small on a broader first-pass baseline set
 - identify samples that produce meaningful backend ordering differences
 
 Mid-term priorities:
