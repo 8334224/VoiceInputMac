@@ -24,11 +24,16 @@ final class AppState: ObservableObject {
     @Published var recoveryActionTitle = ""
     @Published var completionDetail = ""
     @Published var activeInputDeviceName = ""
+    @Published var recentHistory: [RecentDictationHistoryEntry] = []
     @Published var speechHUDPhase: SpeechHUDPhase = .hidden
+    @Published var audioLevel: Float = 0
     @Published var experimentOrderMode: ReRecognitionOrderMode = .blended
     @Published var experimentSampleLabel: ReRecognitionExperimentSampleLabel?
     @Published var experimentSessionTag = ""
     @Published var lastExperimentExportPath = ""
+
+    /// Prevents re-entrant start/stop calls while an async transition is in progress.
+    private var isTransitioning = false
 
     let isExperimentUIEnabled: Bool
 
@@ -38,6 +43,7 @@ final class AppState: ObservableObject {
 
     private let settingsStore: SettingsStore
     private let dictationPipeline: DictationPipelineControlling
+    private let recentHistoryStore: RecentDictationHistoryStoring
     private let textInjector = TextInjector()
     private var hotKeyController: HotKeyController?
     private var cancellables: Set<AnyCancellable> = []
@@ -48,21 +54,31 @@ final class AppState: ObservableObject {
     init(
         settingsStore: SettingsStore,
         dictationPipeline: DictationPipelineControlling = DictationPipeline(),
+        recentHistoryStore: RecentDictationHistoryStoring = RecentDictationHistoryStore(),
         requestPermissions: @escaping PermissionsRequester = { await PermissionsCoordinator.requestAll() },
         accessibilityTrustChecker: @escaping AccessibilityTrustChecker = { AccessibilityCoordinator.isTrusted(prompt: $0) }
     ) {
         self.settingsStore = settingsStore
         self.dictationPipeline = dictationPipeline
+        self.recentHistoryStore = recentHistoryStore
         self.requestPermissions = requestPermissions
         self.accessibilityTrustChecker = accessibilityTrustChecker
         self.isExperimentUIEnabled =
             ProcessInfo.processInfo.environment["VOICEINPUTMAC_ENABLE_EXPERIMENTS"] == "1" ||
             ProcessInfo.processInfo.arguments.contains("--enable-experiments")
-        self.hotKeyController = HotKeyController { [weak self] in
-            Task { @MainActor [weak self] in
-                await self?.toggleRecording()
+        self.hotKeyController = HotKeyController(
+            onPressed: { [weak self] in
+                Task { @MainActor [weak self] in
+                    await self?.handleHotKeyPressed()
+                }
+            },
+            onReleased: { [weak self] in
+                Task { @MainActor [weak self] in
+                    await self?.handleHotKeyReleased()
+                }
             }
-        }
+        )
+        self.recentHistory = recentHistoryStore.load()
         registerHotKey(settingsStore.settings.hotKey)
 
         settingsStore.$settings
@@ -84,7 +100,33 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func handleHotKeyPressed() async {
+        switch settingsStore.settings.hotKeyMode {
+        case .toggle:
+            await toggleRecording()
+        case .pushToTalk:
+            if !isRecording {
+                await startRecording()
+            }
+        }
+    }
+
+    private func handleHotKeyReleased() async {
+        switch settingsStore.settings.hotKeyMode {
+        case .toggle:
+            break
+        case .pushToTalk:
+            if isRecording {
+                await stopRecording()
+            }
+        }
+    }
+
     func startRecording() async {
+        guard !isTransitioning else { return }
+        isTransitioning = true
+        defer { isTransitioning = false }
+
         lastError = ""
         accessibilityWarning = ""
         recoveryActionTitle = ""
@@ -133,6 +175,10 @@ final class AppState: ObservableObject {
                 Task { @MainActor in
                     self?.applyActiveInputDevice(device)
                 }
+            }, onAudioLevel: { [weak self] level in
+                Task { @MainActor in
+                    self?.audioLevel = level
+                }
             }, onFailure: { [weak self] error in
                 Task { @MainActor [weak self] in
                     self?.handlePipelineFailure(error, duringStart: false)
@@ -149,6 +195,7 @@ final class AppState: ObservableObject {
     func stopRecording() async {
         guard isRecording else { return }
         isRecording = false
+        audioLevel = 0
         speechHUDPhase = .transcribing
         statusText = "正在收尾..."
 
@@ -175,13 +222,18 @@ final class AppState: ObservableObject {
                 completionDetail = reason
             }
             speechHUDPhase = .hidden
+            recordRecentHistoryEntry(text: text, onlineOptimizationStatus: result.onlineOptimizationStatus)
             clearActiveInputDevice()
 
             if settingsStore.settings.autoPaste {
                 let trusted = accessibilityTrustChecker(false)
                 if trusted {
                     accessibilityWarning = ""
-                    textInjector.paste(text, preserveClipboard: settingsStore.settings.preserveClipboard)
+                    textInjector.paste(
+                        text,
+                        preserveClipboard: settingsStore.settings.preserveClipboard,
+                        switchInputMethod: settingsStore.settings.switchInputMethodBeforePaste
+                    )
                 } else {
                     accessibilityWarning = "辅助功能权限未生效，结果已保留在应用里。如果你刚刚勾选了权限，请完全退出并重新打开应用。"
                 }
@@ -204,6 +256,32 @@ final class AppState: ObservableObject {
         lastExperimentExportPath = ""
         statusText = "就绪"
         speechHUDPhase = .hidden
+    }
+
+    func clearRecentHistory() {
+        recentHistory = recentHistoryStore.clear()
+    }
+
+    func copyRecentHistoryEntry(_ entry: RecentDictationHistoryEntry) {
+        textInjector.copyToClipboard(entry.text)
+        if !isRecording {
+            statusText = "历史记录已复制"
+        }
+        completionDetail = "已复制一条历史记录。"
+    }
+
+    func restoreRecentHistoryEntry(_ entry: RecentDictationHistoryEntry) {
+        transcriptPreview = entry.text
+        finalTranscript = entry.text
+        lastError = ""
+        if !isRecording {
+            statusText = "已载入历史记录"
+        }
+        if let inputDeviceName = entry.inputDeviceName {
+            completionDetail = "已载入来自 \(inputDeviceName) 的历史记录。"
+        } else {
+            completionDetail = "已载入一条历史记录。"
+        }
     }
 
     func openAccessibilitySettings() {
@@ -284,18 +362,18 @@ final class AppState: ObservableObject {
             switch captureError {
             case .selectedInputDeviceUnavailable:
                 statusText = "所选麦克风不可用"
-                lastError = "\(captureError.localizedDescription) 请在设置页改回系统默认，或重新连接该设备后重试。"
+                lastError = "\(captureError.localizedDescription)\n可能原因：设备已断开或被移除。\n解决方法：重新连接设备，或在设置中改回「系统默认」。"
             case .selectedInputDevicePermissionDenied:
                 statusText = "所选麦克风无权限"
-                lastError = "\(captureError.localizedDescription) 请在系统设置中允许麦克风权限后重试。"
+                lastError = "\(captureError.localizedDescription)\n可能原因：系统未授权本应用使用麦克风。\n解决方法：前往 系统设置 > 隐私与安全性 > 麦克风，勾选本应用。"
                 recoveryTarget = .microphone
                 recoveryActionTitle = "打开麦克风设置"
             case .selectedInputDeviceStartFailed:
                 statusText = "所选麦克风启动失败"
-                lastError = "\(captureError.localizedDescription) 你可以检查设备连接、切换输入设备后再次开始听写。"
+                lastError = "\(captureError.localizedDescription)\n可能原因：设备被其他应用独占，或连接不稳定。\n解决方法：检查设备连接，关闭占用麦克风的应用，然后重试。"
             default:
                 statusText = duringStart ? "麦克风不可用" : "录音已中断"
-                lastError = "\(captureError.localizedDescription) 修复后可直接再次开始听写。"
+                lastError = "\(captureError.localizedDescription)\n解决方法：检查麦克风连接，确认系统输入设备正常后重试。"
             }
             if captureError == .noInputDevice || captureError == .cannotStartEngine {
                 recoveryTarget = .microphone
@@ -308,10 +386,10 @@ final class AppState: ObservableObject {
             switch backendError {
             case .unsupportedLocale:
                 statusText = "语言不可用"
-                lastError = backendError.localizedDescription
+                lastError = "\(backendError.localizedDescription)\n解决方法：在设置中切换到已安装的语言区域（如简体中文或 English）。"
             case .recognizerUnavailable:
                 statusText = "语音识别不可用"
-                lastError = "\(backendError.localizedDescription) 请稍后重试，或检查系统语音识别权限。"
+                lastError = "\(backendError.localizedDescription)\n可能原因：系统语音识别服务暂时不可用，或未授权。\n解决方法：检查语音识别权限，或稍后重试。"
                 recoveryTarget = .speechRecognition
                 recoveryActionTitle = "打开语音识别设置"
             case .notRunning:
@@ -323,5 +401,42 @@ final class AppState: ObservableObject {
 
         statusText = duringStart ? "启动失败" : "听写失败"
         lastError = "\(error.localizedDescription) 你可以直接再次开始听写。"
+    }
+
+    private func recordRecentHistoryEntry(
+        text: String,
+        onlineOptimizationStatus: DictationPipeline.OnlineOptimizationStatus
+    ) {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else { return }
+
+        let entry = RecentDictationHistoryEntry(
+            id: UUID(),
+            createdAt: Date(),
+            text: trimmedText,
+            inputDeviceName: activeInputDeviceName.trimmedNilIfEmpty,
+            optimizationStatus: mapHistoryOptimizationStatus(onlineOptimizationStatus)
+        )
+        recentHistory = recentHistoryStore.record(entry)
+    }
+
+    private func mapHistoryOptimizationStatus(
+        _ status: DictationPipeline.OnlineOptimizationStatus
+    ) -> RecentDictationHistoryEntry.OptimizationStatus {
+        switch status {
+        case .disabled:
+            return .localOnly
+        case .optimized:
+            return .optimized
+        case .fallback:
+            return .fallbackToLocal
+        }
+    }
+}
+
+private extension String {
+    var trimmedNilIfEmpty: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

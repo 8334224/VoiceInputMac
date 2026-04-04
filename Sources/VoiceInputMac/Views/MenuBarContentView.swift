@@ -53,17 +53,63 @@ struct MenuBarContentView: View {
             .padding(10)
             .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
 
+            if !appState.recentHistory.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("最近记录")
+                            .font(.subheadline.weight(.semibold))
+                        Spacer()
+                        Button("清空记录") {
+                            appState.clearRecentHistory()
+                        }
+                        .font(.caption)
+                    }
+
+                    ForEach(Array(appState.recentHistory.prefix(3))) { entry in
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(entry.optimizationStatus.title)
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                if let inputDeviceName = entry.inputDeviceName {
+                                    Text("· \(inputDeviceName)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Text(entry.text)
+                                .font(.caption)
+                                .foregroundStyle(.primary)
+                                .lineLimit(2)
+                                .textSelection(.enabled)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 2)
+                    }
+                }
+            }
+
             if !appState.hotKeyWarning.isEmpty {
-                Text(appState.hotKeyWarning)
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.yellow)
+                        .font(.caption)
+                    Text(appState.hotKeyWarning)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             if !appState.accessibilityWarning.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(appState.accessibilityWarning)
-                        .font(.caption)
-                        .foregroundStyle(.orange)
+                    HStack(spacing: 6) {
+                        Image(systemName: "lock.shield.fill")
+                            .foregroundStyle(.orange)
+                            .font(.caption)
+                        Text(appState.accessibilityWarning)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                     Button("打开辅助功能设置") {
                         appState.openAccessibilitySettings()
                     }
@@ -73,9 +119,14 @@ struct MenuBarContentView: View {
 
             if !appState.lastError.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(appState.lastError)
-                        .font(.caption)
-                        .foregroundStyle(.red)
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.red)
+                            .font(.caption)
+                        Text(appState.lastError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
 
                     if !appState.recoveryActionTitle.isEmpty {
                         Button(appState.recoveryActionTitle) {

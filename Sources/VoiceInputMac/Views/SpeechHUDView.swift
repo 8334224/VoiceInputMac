@@ -8,95 +8,119 @@ struct SpeechHUDView: View {
             switch appState.speechHUDPhase {
             case .recording:
                 recordingHUD
+                    .transition(
+                        .asymmetric(
+                            insertion: .scale(scale: 0.6).combined(with: .opacity),
+                            removal: .scale(scale: 0.85).combined(with: .opacity)
+                        )
+                    )
             case .transcribing:
                 transcribingHUD
+                    .transition(
+                        .asymmetric(
+                            insertion: .scale(scale: 0.6).combined(with: .opacity),
+                            removal: .scale(scale: 0.85).combined(with: .opacity)
+                        )
+                    )
             case .hidden:
                 EmptyView()
             }
         }
+        .animation(.spring(response: 0.35, dampingFraction: 0.78), value: appState.speechHUDPhase)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        .padding(8)
     }
 
-    private var recordingHUD: some View {
-        let capsuleShape = Capsule(style: .continuous)
+    // MARK: - Recording HUD
 
-        return HStack(spacing: 12) {
-            ZStack {
-                Circle()
-                    .fill(Color.white.opacity(0.18))
-                Image(systemName: "mic.fill")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(.white)
-            }
-            .frame(width: 34, height: 34)
+    private var recordingHUD: some View {
+        HStack(spacing: 14) {
+            RMSWaveformView(audioLevel: appState.audioLevel)
+                .frame(width: 44, height: 32)
+
+            Rectangle()
+                .fill(Color.white.opacity(0.12))
+                .frame(width: 1, height: 24)
 
             AutoScrollingTranscriptView(text: recordingText)
                 .frame(maxWidth: .infinity, alignment: .leading)
-
-            RecordingBarsView()
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.leading, 16)
+        .padding(.trailing, 20)
+        .frame(height: 56)
         .background(
-            Capsule(style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.16, green: 0.79, blue: 0.56),
-                            Color(red: 0.09, green: 0.74, blue: 0.49)
-                        ],
-                        startPoint: .leading,
-                        endPoint: .trailing
+            ZStack {
+                Capsule(style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .environment(\.colorScheme, .dark)
+                Capsule(style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.06),
+                                Color.white.opacity(0.02)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
                     )
-                )
-                .overlay(
-                    Capsule(style: .continuous)
-                        .stroke(Color.white.opacity(0.28), lineWidth: 1)
-                )
-                .shadow(color: Color.black.opacity(0.22), radius: 16, x: 0, y: 10)
+                Capsule(style: .continuous)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.22),
+                                Color.white.opacity(0.06)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 0.5
+                    )
+            }
+            .shadow(color: Color.black.opacity(0.35), radius: 24, x: 0, y: 12)
+            .shadow(color: Color.black.opacity(0.12), radius: 4, x: 0, y: 2)
         )
-        .clipShape(capsuleShape)
+        .clipShape(Capsule(style: .continuous))
     }
+
+    // MARK: - Transcribing HUD
 
     private var transcribingHUD: some View {
         HStack(spacing: 10) {
-            Text("转写中")
-                .font(.system(size: 15, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-
-            Rectangle()
-                .fill(Color.white.opacity(0.16))
-                .frame(width: 1, height: 18)
-
             ProgressView()
                 .controlSize(.small)
                 .tint(.white)
-                .scaleEffect(0.8)
+                .scaleEffect(0.82)
+
+            Text("转写中")
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.88))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 18)
+        .frame(height: 44)
         .background(
-            Capsule(style: .continuous)
-                .fill(Color.black.opacity(0.92))
-                .overlay(
-                    Capsule(style: .continuous)
-                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                )
-                .shadow(color: .black.opacity(0.24), radius: 18, x: 0, y: 10)
+            ZStack {
+                Capsule(style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .environment(\.colorScheme, .dark)
+                Capsule(style: .continuous)
+                    .fill(Color.black.opacity(0.3))
+                Capsule(style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5)
+            }
+            .shadow(color: .black.opacity(0.3), radius: 18, x: 0, y: 10)
         )
+        .clipShape(Capsule(style: .continuous))
     }
 
     private var recordingText: String {
         let text = appState.transcriptPreview.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.isEmpty {
-            return "语音输入"
-        }
-        return text
+        return text.isEmpty ? "语音输入" : text
     }
 }
+
+// MARK: - Auto-Scrolling Transcript
 
 private struct AutoScrollingTranscriptView: View {
     let text: String
@@ -106,8 +130,8 @@ private struct AutoScrollingTranscriptView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 0) {
                     Text(text)
-                        .font(.system(size: 15, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
+                        .font(.system(size: 15, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.92))
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
                     Color.clear
@@ -131,29 +155,85 @@ private struct AutoScrollingTranscriptView: View {
     }
 }
 
-private struct RecordingBarsView: View {
-    @State private var phase: CGFloat = 0
-    private let barCount = 4
+// MARK: - RMS Waveform (5 bars, envelope-smoothed, real audio data)
+
+private struct RMSWaveformView: View {
+    let audioLevel: Float
+
+    private static let barCount = 5
+    private static let barWeights: [CGFloat] = [0.5, 0.8, 1.0, 0.75, 0.55]
+    private static let barSpacing: CGFloat = 4
+    private static let barWidth: CGFloat = 4
+    private static let barCornerRadius: CGFloat = 2
+    private static let minBarHeight: CGFloat = 4
+    private static let maxBarHeight: CGFloat = 30
+
+    @State private var smoothedLevel: CGFloat = 0
+    @State private var barJitter: [CGFloat] = (0..<5).map { _ in CGFloat.random(in: -0.04...0.04) }
+    @State private var idlePhase: CGFloat = 0
 
     var body: some View {
-        HStack(alignment: .center, spacing: 4) {
-            ForEach(0..<barCount, id: \.self) { index in
-                RoundedRectangle(cornerRadius: 2, style: .continuous)
-                    .fill(Color.white)
-                    .frame(width: 4, height: barHeight(for: index))
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+            HStack(alignment: .center, spacing: Self.barSpacing) {
+                ForEach(0..<Self.barCount, id: \.self) { index in
+                    RoundedRectangle(cornerRadius: Self.barCornerRadius, style: .continuous)
+                        .fill(barGradient)
+                        .frame(width: Self.barWidth, height: barHeight(for: index))
+                }
+            }
+            .onChange(of: timeline.date) { _, _ in
+                updateEnvelope()
+                updateJitter()
             }
         }
-        .frame(width: 28, height: 22, alignment: .center)
         .onAppear {
-            withAnimation(.easeInOut(duration: 0.68).repeatForever(autoreverses: true)) {
-                phase = 1
+            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+                idlePhase = 1
             }
         }
     }
 
+    private var barGradient: LinearGradient {
+        LinearGradient(
+            colors: [
+                Color(red: 0.40, green: 0.95, blue: 0.70),
+                Color(red: 0.20, green: 0.78, blue: 0.55)
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+    }
+
     private func barHeight(for index: Int) -> CGFloat {
-        let offsets: [CGFloat] = [0.05, 0.42, 0.75, 1.1]
-        let wave = abs(sin((phase + offsets[index]) * .pi))
-        return 8 + wave * 9
+        let weight = Self.barWeights[index]
+        let jitter = 1.0 + barJitter[index]
+
+        if smoothedLevel < 0.005 {
+            let offsets: [CGFloat] = [0.0, 0.25, 0.5, 0.75, 0.4]
+            let wave = abs(sin((idlePhase + offsets[index]) * .pi))
+            let idleHeight = Self.minBarHeight + wave * 3 * weight
+            return idleHeight
+        }
+
+        let driven = smoothedLevel * weight * jitter
+        let height = Self.minBarHeight + driven * (Self.maxBarHeight - Self.minBarHeight)
+        return min(max(height, Self.minBarHeight), Self.maxBarHeight)
+    }
+
+    private func updateEnvelope() {
+        let raw = CGFloat(min(max(audioLevel, 0), 1.0))
+        let normalized = min(raw / 0.25, 1.0)
+
+        if normalized > smoothedLevel {
+            smoothedLevel += (normalized - smoothedLevel) * 0.40
+        } else {
+            smoothedLevel += (normalized - smoothedLevel) * 0.15
+        }
+    }
+
+    private func updateJitter() {
+        for i in 0..<Self.barCount {
+            barJitter[i] = CGFloat.random(in: -0.04...0.04)
+        }
     }
 }

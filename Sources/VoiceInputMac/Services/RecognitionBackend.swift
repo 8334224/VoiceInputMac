@@ -342,7 +342,12 @@ final class AppleSpeechRecognitionBackend: RecognitionBackend {
         recognitionTask = nil
         request = nil
         recognizer = nil
-        finishContinuation = nil
+        // Resume any pending continuation before dropping it to avoid
+        // a leaked continuation (undefined behavior / crash in debug).
+        if let continuation = finishContinuation {
+            finishContinuation = nil
+            continuation.resume(returning: latestSnapshot)
+        }
         onUpdate = nil
         isStopping = false
     }
@@ -617,6 +622,9 @@ final class SenseVoiceSmallRecognitionBackend: RecognitionBackend {
         return Double(file.length) / sampleRate
     }
 
+    /// Maximum time (in seconds) to wait for the SenseVoice Python process.
+    private static let processTimeoutSeconds: TimeInterval = 60
+
     private static func runHelper(
         pythonURL: URL,
         scriptURL: URL,
@@ -625,6 +633,17 @@ final class SenseVoiceSmallRecognitionBackend: RecognitionBackend {
         language: String
     ) async throws -> ScriptResponse {
         try await withCheckedThrowingContinuation { continuation in
+            nonisolated(unsafe) var didResume = false
+            let lock = NSLock()
+
+            @Sendable func resumeOnce(with result: Result<ScriptResponse, Error>) {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !didResume else { return }
+                didResume = true
+                continuation.resume(with: result)
+            }
+
             let process = Process()
             let stdoutPipe = Pipe()
             let stderrPipe = Pipe()
@@ -647,22 +666,32 @@ final class SenseVoiceSmallRecognitionBackend: RecognitionBackend {
                 let stderr = String(decoding: stderrData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
 
                 guard process.terminationStatus == 0 else {
-                    continuation.resume(throwing: SenseVoiceError.inferenceFailed(stderr.isEmpty ? stdout : stderr))
+                    resumeOnce(with: .failure(SenseVoiceError.inferenceFailed(stderr.isEmpty ? stdout : stderr)))
                     return
                 }
 
                 do {
                     let decoded = try JSONDecoder().decode(ScriptResponse.self, from: Data(stdout.utf8))
-                    continuation.resume(returning: decoded)
+                    resumeOnce(with: .success(decoded))
                 } catch {
-                    continuation.resume(throwing: SenseVoiceError.inferenceFailed("无法解析输出：\(stdout)"))
+                    resumeOnce(with: .failure(SenseVoiceError.inferenceFailed("无法解析输出：\(stdout)")))
                 }
             }
 
             do {
                 try process.run()
             } catch {
-                continuation.resume(throwing: SenseVoiceError.inferenceFailed(error.localizedDescription))
+                resumeOnce(with: .failure(SenseVoiceError.inferenceFailed(error.localizedDescription)))
+                return
+            }
+
+            // Timeout watchdog: terminate the process if it exceeds the limit.
+            DispatchQueue.global().asyncAfter(deadline: .now() + processTimeoutSeconds) {
+                guard process.isRunning else { return }
+                process.terminate()
+                resumeOnce(with: .failure(SenseVoiceError.inferenceFailed(
+                    "SenseVoice 推理超时（\(Int(processTimeoutSeconds)) 秒），进程已终止。"
+                )))
             }
         }
     }

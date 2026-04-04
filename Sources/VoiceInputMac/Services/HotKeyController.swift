@@ -167,20 +167,25 @@ enum HotKeyCatalog {
 final class HotKeyController {
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
-    private let callback: () -> Void
+    private let onPressed: () -> Void
+    private let onReleased: () -> Void
     private let hotKeyID = EventHotKeyID(signature: OSType(0x56494D43), id: 1)
     private var currentDescriptor: HotKeyDescriptor?
 
-    init(callback: @escaping () -> Void) {
-        self.callback = callback
+    init(onPressed: @escaping () -> Void, onReleased: @escaping () -> Void = {}) {
+        self.onPressed = onPressed
+        self.onReleased = onReleased
         installEventHandlerIfNeeded()
     }
 
     deinit {
-        unregister()
+        // Remove event handler first so the callback cannot fire on a
+        // partially-deallocated controller after the hotkey is unregistered.
         if let eventHandler {
             RemoveEventHandler(eventHandler)
+            self.eventHandler = nil
         }
+        unregister()
     }
 
     @discardableResult
@@ -208,7 +213,10 @@ final class HotKeyController {
     private func installEventHandlerIfNeeded() {
         guard eventHandler == nil else { return }
 
-        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        var eventTypes = [
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased))
+        ]
         InstallEventHandler(
             GetApplicationEventTarget(),
             { _, event, userData in
@@ -225,13 +233,19 @@ final class HotKeyController {
                 )
 
                 let controller = Unmanaged<HotKeyController>.fromOpaque(userData).takeUnretainedValue()
-                if receivedHotKeyID.id == controller.hotKeyID.id {
-                    controller.callback()
+                guard receivedHotKeyID.id == controller.hotKeyID.id else { return noErr }
+
+                let kind = GetEventKind(event)
+                if kind == UInt32(kEventHotKeyPressed) {
+                    controller.onPressed()
+                } else if kind == UInt32(kEventHotKeyReleased) {
+                    controller.onReleased()
                 }
+
                 return noErr
             },
-            1,
-            &eventType,
+            eventTypes.count,
+            &eventTypes,
             Unmanaged.passUnretained(self).toOpaque(),
             &eventHandler
         )

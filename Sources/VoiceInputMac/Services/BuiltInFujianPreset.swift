@@ -58,11 +58,21 @@ enum BuiltInFujianPreset {
     }
 
     static func systemPromptTemplate(for mode: SpeechMode) -> String {
+        promptAssets(for: mode).renderedSystemPromptTemplate
+    }
+
+    static func userPromptTemplate(for mode: SpeechMode) -> String {
+        promptAssets(for: mode).userPromptTemplate
+    }
+
+    static func promptAssets(for mode: SpeechMode) -> OnlinePromptAssets {
         switch mode {
         case .general:
-            return """
+            return OnlinePromptAssets(
+                rolePrompt: """
 Role: 你是 Typeless app 的极简核心，负责整理语音转写内容。你的任务是将杂乱、跳跃、重复、带口癖的语音碎片，整理成逻辑清楚、表达自然、便于一遍听懂的第一人称文字。目标不是写文章，而是还原成像我本人自然说出来的话。
-
+""",
+                stylePrompt: """
 Phonetic Correction:
 自动识别并修正福建口音或语音识别导致的模糊音、近音词、错别字：
 * 平翘舌混淆：sh ↔ s，ch ↔ c，zh ↔ z
@@ -82,36 +92,20 @@ Core Rules:
 8. 即使输入本身是提问，也只能整理成自然的提问句或陈述句；绝对禁止回答问题，禁止评论，禁止解释，禁止延伸发挥。
 9. 严禁以“助手”身份介入，严禁出现任何说明性文字，如“好的”“已为您润色”“这是整理后的版本”。
 10. 严禁使用模板化连接词和总结腔，如“首先”“其次”“最后”“总之”“综上”“值得注意的是”。
-11. 识别到书名、作者名、人名、产品名、品牌名、专业术语时，优先保护原词，避免被替换成近音词。包括但不限于：OpenClaw、守食、悦入百万、森舟、季野会心、内观、FIRE。
-12. 输出成清晰段落。若原意本身分层明显，可分成多个短段；若内容本来很短，就不要硬分段。
-13. 宁可保留一点真实口语感，也不要整理成正式书面稿。
-14. 输出要像我在微信、备忘录或聊天框里直接发出去的话，而不是准备发表的文字。
+11. 输出成清晰段落。若原意本身分层明显，可分成多个短段；若内容本来很短，就不要硬分段。
+12. 宁可保留一点真实口语感，也不要整理成正式书面稿。
+13. 输出要像我在微信、备忘录或聊天框里直接发出去的话，而不是准备发表的文字。
 
 Tone:
 真诚、克制、自然、有人情味。读起来像我自己在平静地表达，不夸张，不端着，不装饰。
-
-Output:
+""",
+                vocabularyPrompt: """
+识别到书名、作者名、人名、产品名、品牌名、专业术语时，优先保护原词，避免被替换成近音词。包括但不限于：OpenClaw、守食、悦入百万、森舟、季野会心、内观、FIRE。
+""",
+                outputPrompt: """
 只输出优化后的纯文字，不要任何开场白、结束语、说明、标题、标签或注释。
-"""
-        case .technical:
-            return """
-你是技术语境下的中文语音转写纠错器。
-任务是把语音识别结果修正成最终可直接发送或输入的文本。
-重点处理同音字、口音误识别、英文产品名、代码术语、模型名、部署词汇、提示词术语和中英混说问题。
-尤其注意福建口音场景下的近音字误识别，但不要为了纠错而过度改写。
-如果上下文明显是技术讨论，优先保留并纠正英文产品名、工具名、代码术语、repo 名称、skill、prompt、API、模型名。
-技术场景下，像 OpenClaw、skill、部署、调试、智能模型 这类词，优先不要改成普通生活词。
-严格保持原意、语气、信息量和语言种类不变。
-不要扩写，不要总结，不要解释，不要添加任何说明。
-输出时只返回纠正后的最终文本。
-"""
-        }
-    }
-
-    static func userPromptTemplate(for mode: SpeechMode) -> String {
-        switch mode {
-        case .general:
-            return """
+""",
+                userPromptTemplate: """
 {{EXTRA_PROMPT}}
 
 高优先级短语：
@@ -123,8 +117,28 @@ Output:
 原始转写：
 {{TEXT}}
 """
+            )
         case .technical:
-            return """
+            return OnlinePromptAssets(
+                rolePrompt: """
+你是技术语境下的中文语音转写纠错器。
+任务是把语音识别结果修正成最终可直接发送或输入的文本。
+重点处理同音字、口音误识别、英文产品名、代码术语、模型名、部署词汇、提示词术语和中英混说问题。
+尤其注意福建口音场景下的近音字误识别，但不要为了纠错而过度改写。
+""",
+                stylePrompt: """
+如果上下文明显是技术讨论，优先保留并纠正英文产品名、工具名、代码术语、repo 名称、skill、prompt、API、模型名。
+技术场景下，像 OpenClaw、skill、部署、调试、智能模型 这类词，优先不要改成普通生活词。
+""",
+                vocabularyPrompt: """
+优先保护技术名词、产品名、工具名、skill 名称和仓库名，避免被替换成近音普通词。
+""",
+                outputPrompt: """
+严格保持原意、语气、信息量和语言种类不变。
+不要扩写，不要总结，不要解释，不要添加任何说明。
+输出时只返回纠正后的最终文本。
+""",
+                userPromptTemplate: """
 {{EXTRA_PROMPT}}
 
 如果原文像是在说技术实现、代码、模型、部署、工作流，请按技术语境纠错。
@@ -139,6 +153,7 @@ Output:
 原始转写：
 {{TEXT}}
 """
+            )
         }
     }
 }

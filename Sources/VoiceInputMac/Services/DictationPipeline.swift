@@ -8,6 +8,7 @@ protocol DictationPipelineControlling: AnyObject, Sendable {
         onPreview: @escaping @Sendable (String) -> Void,
         onSegments: @escaping @Sendable ([TranscriptSegment]) -> Void,
         onActiveInputDevice: @escaping @Sendable (ActiveInputDeviceInfo) -> Void,
+        onAudioLevel: @escaping @Sendable (Float) -> Void,
         onFailure: @escaping @Sendable (Error) -> Void
     ) async throws
 
@@ -61,6 +62,8 @@ final class DictationPipeline: DictationPipelineControlling, @unchecked Sendable
     private let candidateResolver = CandidateResolver()
     private let backendPreferenceHistoryStore = BackendPreferenceHistoryStore()
     private let enabledReRecognitionBackends = ReRecognitionBackendOption.allCases.filter(\.shouldRunByDefault)
+    /// Serial queue protecting mutable pipeline state against concurrent access.
+    private let stateQueue = DispatchQueue(label: "VoiceInputMac.DictationPipeline.state")
     private var reRecognitionOrderMode: ReRecognitionOrderMode = .blended
     private var experimentTag = ReRecognitionExperimentTag(sampleLabel: nil, sessionTag: nil)
     private var experimentPathEnabled = false
@@ -81,10 +84,12 @@ final class DictationPipeline: DictationPipelineControlling, @unchecked Sendable
         onPreview: @escaping @Sendable (String) -> Void,
         onSegments: @escaping @Sendable ([TranscriptSegment]) -> Void = { _ in },
         onActiveInputDevice: @escaping @Sendable (ActiveInputDeviceInfo) -> Void = { _ in },
+        onAudioLevel: @escaping @Sendable (Float) -> Void = { _ in },
         onFailure: @escaping @Sendable (Error) -> Void = { _ in }
     ) async throws {
         await awaitPendingReRecognitionIfNeeded()
-        guard !running else { throw DictationError.alreadyRunning }
+        let alreadyRunning = stateQueue.sync { running }
+        guard !alreadyRunning else { throw DictationError.alreadyRunning }
 
         correctionPipeline = TextCorrectionPipeline(settings: settings)
         postProcessor = BasicTextPostProcessor(correctionPipeline: correctionPipeline)
@@ -96,7 +101,7 @@ final class DictationPipeline: DictationPipelineControlling, @unchecked Sendable
         await candidateStore.beginSession(id: nil)
 
         let backend = AppleSpeechRecognitionBackend()
-        recognitionBackend = backend
+        stateQueue.sync { recognitionBackend = backend }
 
         let configuration = RecognitionConfiguration(
             localeIdentifier: settings.localeIdentifier,
@@ -112,7 +117,7 @@ final class DictationPipeline: DictationPipelineControlling, @unchecked Sendable
                 rawSnapshot: snapshot,
                 processedSnapshot: postProcessed
             )
-            self.latestSnapshot = detected
+            self.stateQueue.sync { self.latestSnapshot = detected }
             self.logSuspiciousSegmentsIfNeeded(detected.segments, isFinal: detected.isFinal)
             onPreview(detected.displayText)
             onSegments(detected.segments)
@@ -124,13 +129,26 @@ final class DictationPipeline: DictationPipelineControlling, @unchecked Sendable
             let sessionAudio = try audioCaptureService.startSession(
                 selection: settings.microphoneSelection,
                 onBuffer: { [weak self] buffer, _ in
-                    self?.recognitionBackend?.appendAudioBuffer(buffer)
+                    self?.stateQueue.sync { self?.recognitionBackend }?.appendAudioBuffer(buffer)
+                    if let channelData = buffer.floatChannelData?[0] {
+                        let frameLength = Int(buffer.frameLength)
+                        guard frameLength > 0 else { return }
+                        var sumOfSquares: Float = 0
+                        for i in 0..<frameLength {
+                            let sample = channelData[i]
+                            sumOfSquares += sample * sample
+                        }
+                        let rms = sqrtf(sumOfSquares / Float(frameLength))
+                        onAudioLevel(rms)
+                    }
                 },
                 onFailure: { [weak self] error in
-                    Task { @MainActor [weak self] in
-                        self?.running = false
-                        self?.recognitionBackend?.cancel()
-                        self?.recognitionBackend = nil
+                    if let self {
+                        self.stateQueue.sync {
+                            self.running = false
+                            self.recognitionBackend?.cancel()
+                            self.recognitionBackend = nil
+                        }
                     }
                     onFailure(error)
                 }
@@ -145,12 +163,14 @@ final class DictationPipeline: DictationPipelineControlling, @unchecked Sendable
             }
             await candidateStore.beginSession(id: sessionAudio.id)
         } catch {
-            recognitionBackend?.cancel()
-            recognitionBackend = nil
+            stateQueue.sync {
+                recognitionBackend?.cancel()
+                recognitionBackend = nil
+            }
             throw error
         }
 
-        running = true
+        stateQueue.sync { running = true }
         onStatus("正在听写...")
     }
 
@@ -159,10 +179,13 @@ final class DictationPipeline: DictationPipelineControlling, @unchecked Sendable
         onStatus: @escaping @Sendable (String) -> Void,
         onSegments: @escaping @Sendable ([TranscriptSegment]) -> Void = { _ in }
     ) async throws -> StopResult {
-        guard running else { throw DictationError.notRunning }
-        guard let recognitionBackend else { throw DictationError.notRunning }
+        let currentBackend: RecognitionBackend? = stateQueue.sync {
+            guard running else { return nil }
+            running = false
+            return recognitionBackend
+        }
+        guard let currentBackend else { throw DictationError.notRunning }
 
-        running = false
         onStatus("整理转写结果...")
 
         // Keep a short tail so the final syllables are not cut off,
@@ -172,20 +195,20 @@ final class DictationPipeline: DictationPipelineControlling, @unchecked Sendable
         let sessionAudio = try audioCaptureService.stopSession()
         let finalizedSnapshot: RecognitionResultSnapshot
         do {
-            finalizedSnapshot = try await recognitionBackend.finish()
+            finalizedSnapshot = try await currentBackend.finish()
         } catch {
-            recognitionBackend.cancel()
-            self.recognitionBackend = nil
+            currentBackend.cancel()
+            stateQueue.sync { self.recognitionBackend = nil }
             throw error
         }
-        self.recognitionBackend = nil
+        stateQueue.sync { self.recognitionBackend = nil }
 
         let postProcessed = postProcessor.process(finalizedSnapshot)
         let processedSnapshot = suspicionDetector.evaluate(
             rawSnapshot: finalizedSnapshot,
             processedSnapshot: postProcessed
         )
-        latestSnapshot = processedSnapshot
+        stateQueue.sync { latestSnapshot = processedSnapshot }
         logSuspiciousSegmentsIfNeeded(processedSnapshot.segments, isFinal: processedSnapshot.isFinal)
         onSegments(processedSnapshot.segments)
 
@@ -230,7 +253,7 @@ final class DictationPipeline: DictationPipelineControlling, @unchecked Sendable
     }
 
     func latestSegments() -> [TranscriptSegment] {
-        latestSnapshot.segments
+        stateQueue.sync { latestSnapshot.segments }
     }
 
     func latestSession() -> DictationSessionRecord? {
@@ -426,12 +449,14 @@ final class DictationPipeline: DictationPipelineControlling, @unchecked Sendable
     }
 
     func cancelCurrentSession() {
-        recognitionBackend?.cancel()
-        recognitionBackend = nil
+        stateQueue.sync {
+            recognitionBackend?.cancel()
+            recognitionBackend = nil
+            running = false
+        }
         audioCaptureService.cancelSession()
         pendingReRecognitionTask?.cancel()
         pendingReRecognitionTask = nil
-        running = false
     }
 
     func extractAudioClip(startTime: TimeInterval, endTime: TimeInterval) throws -> URL {

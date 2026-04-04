@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>MOMO语音输入法</string>
+	<key>CFBundleDisplayName</key>
+	<string>MOMO语音输入法</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.momo.voiceinput</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleExecutable</key>
+	<string>VoiceInputMac</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>MOMO语音输入法需要使用麦克风来进行语音识别。</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>MOMO语音输入法需要语音识别权限来将语音转换为文字。</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+</dict>
+</plist>

@@ -133,7 +133,8 @@ struct OnlineOptimizer {
         return try await sendRequest(
             messages: messages,
             settings: settings,
-            correctionPipeline: correctionPipeline
+            correctionPipeline: correctionPipeline,
+            skipEnabledCheck: true
         )
     }
 
@@ -178,7 +179,8 @@ struct OnlineOptimizer {
     private func sendRequest(
         messages: [RequestBody.Message],
         settings: AppSettings,
-        correctionPipeline: TextCorrectionPipeline
+        correctionPipeline: TextCorrectionPipeline,
+        skipEnabledCheck: Bool = false
     ) async throws -> String {
         _ = correctionPipeline
 
@@ -186,8 +188,10 @@ struct OnlineOptimizer {
         let modelName = settings.modelName.trimmingCharacters(in: .whitespacesAndNewlines)
         let endpoint = settings.onlineProvider.normalizedEndpoint(from: settings.apiEndpoint)
 
-        guard settings.onlineOptimizationEnabled else {
-            throw OptimizationError.invalidConfiguration("在线纠错当前未启用。")
+        if !skipEnabledCheck {
+            guard settings.onlineOptimizationEnabled else {
+                throw OptimizationError.invalidConfiguration("在线纠错当前未启用。")
+            }
         }
         guard !apiKey.isEmpty else {
             throw OptimizationError.invalidConfiguration("API Key 为空。")

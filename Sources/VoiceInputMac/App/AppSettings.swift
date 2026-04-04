@@ -1,5 +1,19 @@
 import Foundation
 
+enum HotKeyMode: String, Codable, CaseIterable, Identifiable, Sendable {
+    case toggle
+    case pushToTalk
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .toggle: return "按一下切换"
+        case .pushToTalk: return "按住说话"
+        }
+    }
+}
+
 struct AppSettings: Codable {
     var localeIdentifier: String
     var autoPaste: Bool
@@ -8,6 +22,8 @@ struct AppSettings: Codable {
     var selectedMicrophoneID: String
     var selectedMicrophoneName: String
     var hotKey: HotKeyDescriptor
+    var hotKeyMode: HotKeyMode
+    var switchInputMethodBeforePaste: Bool
     var speechMode: SpeechMode
     var onlineOptimizationEnabled: Bool
     var onlineProvider: OnlineProvider
@@ -19,12 +35,17 @@ struct AppSettings: Codable {
     var customPhrasesText: String
     var replacementRulesText: String
     var extraPrompt: String
+    var optimizerRolePromptAsset: String
+    var optimizerStylePromptAsset: String
+    var optimizerVocabularyPromptAsset: String
+    var optimizerOutputPromptAsset: String
     var optimizerSystemPromptTemplate: String
     var optimizerUserPromptTemplate: String
     var onlineSoftTimeoutSeconds: Double
     var requestTimeoutSeconds: Double
 
     init() {
+        let promptAssets = BuiltInFujianPreset.promptAssets(for: .general)
         localeIdentifier = "zh-CN"
         autoPaste = true
         preserveClipboard = true
@@ -32,6 +53,8 @@ struct AppSettings: Codable {
         selectedMicrophoneID = ""
         selectedMicrophoneName = ""
         hotKey = .default
+        hotKeyMode = .toggle
+        switchInputMethodBeforePaste = true
         speechMode = .general
         onlineOptimizationEnabled = false
         onlineProvider = .googleGemini
@@ -43,8 +66,12 @@ struct AppSettings: Codable {
         customPhrasesText = ""
         replacementRulesText = ""
         extraPrompt = ""
-        optimizerSystemPromptTemplate = BuiltInFujianPreset.systemPromptTemplate(for: .general)
-        optimizerUserPromptTemplate = BuiltInFujianPreset.userPromptTemplate(for: .general)
+        optimizerRolePromptAsset = promptAssets.rolePrompt
+        optimizerStylePromptAsset = promptAssets.stylePrompt
+        optimizerVocabularyPromptAsset = promptAssets.vocabularyPrompt
+        optimizerOutputPromptAsset = promptAssets.outputPrompt
+        optimizerSystemPromptTemplate = promptAssets.renderedSystemPromptTemplate
+        optimizerUserPromptTemplate = promptAssets.userPromptTemplate
         onlineSoftTimeoutSeconds = 8.0
         requestTimeoutSeconds = 8.0
     }
@@ -59,6 +86,8 @@ struct AppSettings: Codable {
         selectedMicrophoneID = try container.decodeIfPresent(String.self, forKey: .selectedMicrophoneID) ?? defaults.selectedMicrophoneID
         selectedMicrophoneName = try container.decodeIfPresent(String.self, forKey: .selectedMicrophoneName) ?? defaults.selectedMicrophoneName
         hotKey = try container.decodeIfPresent(HotKeyDescriptor.self, forKey: .hotKey) ?? defaults.hotKey
+        hotKeyMode = try container.decodeIfPresent(HotKeyMode.self, forKey: .hotKeyMode) ?? defaults.hotKeyMode
+        switchInputMethodBeforePaste = try container.decodeIfPresent(Bool.self, forKey: .switchInputMethodBeforePaste) ?? defaults.switchInputMethodBeforePaste
         speechMode = try container.decodeIfPresent(SpeechMode.self, forKey: .speechMode) ?? defaults.speechMode
         onlineOptimizationEnabled = try container.decodeIfPresent(Bool.self, forKey: .onlineOptimizationEnabled) ?? defaults.onlineOptimizationEnabled
         onlineProvider = try container.decodeIfPresent(OnlineProvider.self, forKey: .onlineProvider) ?? defaults.onlineProvider
@@ -70,8 +99,50 @@ struct AppSettings: Codable {
         customPhrasesText = try container.decodeIfPresent(String.self, forKey: .customPhrasesText) ?? defaults.customPhrasesText
         replacementRulesText = try container.decodeIfPresent(String.self, forKey: .replacementRulesText) ?? defaults.replacementRulesText
         extraPrompt = try container.decodeIfPresent(String.self, forKey: .extraPrompt) ?? defaults.extraPrompt
-        optimizerSystemPromptTemplate = try container.decodeIfPresent(String.self, forKey: .optimizerSystemPromptTemplate) ?? BuiltInFujianPreset.systemPromptTemplate(for: speechMode)
-        optimizerUserPromptTemplate = try container.decodeIfPresent(String.self, forKey: .optimizerUserPromptTemplate) ?? BuiltInFujianPreset.userPromptTemplate(for: speechMode)
+        let defaultPromptAssets = BuiltInFujianPreset.promptAssets(for: speechMode)
+        let legacySystemPrompt = try container.decodeIfPresent(String.self, forKey: .optimizerSystemPromptTemplate)
+        let decodedRolePrompt = try container.decodeIfPresent(String.self, forKey: .optimizerRolePromptAsset)
+        let decodedStylePrompt = try container.decodeIfPresent(String.self, forKey: .optimizerStylePromptAsset)
+        let decodedVocabularyPrompt = try container.decodeIfPresent(String.self, forKey: .optimizerVocabularyPromptAsset)
+        let decodedOutputPrompt = try container.decodeIfPresent(String.self, forKey: .optimizerOutputPromptAsset)
+
+        if let decodedRolePrompt, let decodedStylePrompt, let decodedVocabularyPrompt, let decodedOutputPrompt {
+            optimizerRolePromptAsset = decodedRolePrompt
+            optimizerStylePromptAsset = decodedStylePrompt
+            optimizerVocabularyPromptAsset = decodedVocabularyPrompt
+            optimizerOutputPromptAsset = decodedOutputPrompt
+        } else if let legacySystemPrompt {
+            let trimmedLegacySystemPrompt = legacySystemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedLegacySystemPrompt.isEmpty || Self.isLegacyGeneralSystemPrompt(trimmedLegacySystemPrompt) {
+                optimizerRolePromptAsset = defaultPromptAssets.rolePrompt
+                optimizerStylePromptAsset = defaultPromptAssets.stylePrompt
+                optimizerVocabularyPromptAsset = defaultPromptAssets.vocabularyPrompt
+                optimizerOutputPromptAsset = defaultPromptAssets.outputPrompt
+            } else {
+                let legacyAssets = OnlinePromptAssets.legacy(
+                    systemPrompt: trimmedLegacySystemPrompt,
+                    userPromptTemplate: try container.decodeIfPresent(String.self, forKey: .optimizerUserPromptTemplate) ?? defaultPromptAssets.userPromptTemplate
+                )
+                optimizerRolePromptAsset = legacyAssets.rolePrompt
+                optimizerStylePromptAsset = legacyAssets.stylePrompt
+                optimizerVocabularyPromptAsset = legacyAssets.vocabularyPrompt
+                optimizerOutputPromptAsset = legacyAssets.outputPrompt
+            }
+        } else {
+            optimizerRolePromptAsset = defaultPromptAssets.rolePrompt
+            optimizerStylePromptAsset = defaultPromptAssets.stylePrompt
+            optimizerVocabularyPromptAsset = defaultPromptAssets.vocabularyPrompt
+            optimizerOutputPromptAsset = defaultPromptAssets.outputPrompt
+        }
+
+        optimizerUserPromptTemplate = try container.decodeIfPresent(String.self, forKey: .optimizerUserPromptTemplate) ?? defaultPromptAssets.userPromptTemplate
+        optimizerSystemPromptTemplate = OnlinePromptAssets(
+            rolePrompt: optimizerRolePromptAsset,
+            stylePrompt: optimizerStylePromptAsset,
+            vocabularyPrompt: optimizerVocabularyPromptAsset,
+            outputPrompt: optimizerOutputPromptAsset,
+            userPromptTemplate: optimizerUserPromptTemplate
+        ).renderedSystemPromptTemplate
         onlineSoftTimeoutSeconds = try container.decodeIfPresent(Double.self, forKey: .onlineSoftTimeoutSeconds) ?? defaults.onlineSoftTimeoutSeconds
         requestTimeoutSeconds = try container.decodeIfPresent(Double.self, forKey: .requestTimeoutSeconds) ?? defaults.requestTimeoutSeconds
     }
@@ -82,5 +153,43 @@ struct AppSettings: Codable {
             selectedMicrophoneID: selectedMicrophoneID,
             selectedMicrophoneName: selectedMicrophoneName
         )
+    }
+
+    var onlinePromptAssets: OnlinePromptAssets {
+        get {
+            OnlinePromptAssets(
+                rolePrompt: optimizerRolePromptAsset,
+                stylePrompt: optimizerStylePromptAsset,
+                vocabularyPrompt: optimizerVocabularyPromptAsset,
+                outputPrompt: optimizerOutputPromptAsset,
+                userPromptTemplate: optimizerUserPromptTemplate
+            )
+        }
+        set {
+            optimizerRolePromptAsset = newValue.rolePrompt
+            optimizerStylePromptAsset = newValue.stylePrompt
+            optimizerVocabularyPromptAsset = newValue.vocabularyPrompt
+            optimizerOutputPromptAsset = newValue.outputPrompt
+            optimizerUserPromptTemplate = newValue.userPromptTemplate
+            optimizerSystemPromptTemplate = newValue.renderedSystemPromptTemplate
+        }
+    }
+
+    var renderedOptimizerSystemPromptTemplate: String {
+        onlinePromptAssets.renderedSystemPromptTemplate
+    }
+
+    private static func isLegacyGeneralSystemPrompt(_ template: String) -> Bool {
+        let normalized = template.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if normalized.isEmpty { return false }
+        if normalized.contains("Role: 你是 Typeless app 的极简核心") { return false }
+
+        let legacyPrefixes = [
+            "你是中文语音转写纠错器。",
+            "任务是把语音识别结果修正成最终可直接发送或输入的文本。"
+        ]
+
+        return legacyPrefixes.contains { normalized.hasPrefix($0) }
     }
 }

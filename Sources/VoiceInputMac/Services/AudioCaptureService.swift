@@ -61,6 +61,11 @@ final class AudioCaptureService {
     private let deviceProvider: MicrophoneDeviceProviding
     private let backend: AudioCaptureBackend
 
+    /// Maximum age (in seconds) of temporary audio files before cleanup. Default: 1 hour.
+    private static let maxTempFileAge: TimeInterval = 3600
+    /// Maximum number of temporary session files to keep.
+    private static let maxTempFileCount = 10
+
     private var activeRecordingSession: (any AudioCaptureRecordingSession)?
     private var currentSession: SessionAudioArtifact?
     private var currentSelection: MicrophoneSelectionConfiguration?
@@ -72,6 +77,7 @@ final class AudioCaptureService {
     ) {
         self.deviceProvider = deviceProvider
         self.backend = backend ?? AVCaptureAudioCaptureBackend(tempDirectory: tempDirectory)
+        cleanupOldTempFiles()
     }
 
     func startSession(
@@ -125,6 +131,7 @@ final class AudioCaptureService {
         self.activeRecordingSession = nil
         currentSelection = nil
         isRunning = false
+        cleanupOldTempFiles()
         return finishedSession
     }
 
@@ -190,6 +197,43 @@ final class AudioCaptureService {
         }
 
         return clipURL
+    }
+
+    /// Removes stale temporary audio files that exceed the age or count limit.
+    private func cleanupOldTempFiles() {
+        let fm = FileManager.default
+        guard let contents = try? fm.contentsOfDirectory(
+            at: tempDirectory,
+            includingPropertiesForKeys: [.creationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        let now = Date()
+        let currentFileURL = currentSession?.fileURL
+
+        // Sort newest first so we can keep the most recent ones.
+        let sorted = contents
+            .compactMap { url -> (URL, Date)? in
+                guard let attrs = try? fm.attributesOfItem(atPath: url.path),
+                      let created = attrs[.creationDate] as? Date else {
+                    return (url, .distantPast)
+                }
+                return (url, created)
+            }
+            .sorted { $0.1 > $1.1 }
+
+        for (index, entry) in sorted.enumerated() {
+            let (fileURL, created) = entry
+            // Never remove the file belonging to the current active session.
+            if fileURL == currentFileURL { continue }
+
+            let tooOld = now.timeIntervalSince(created) > Self.maxTempFileAge
+            let overLimit = index >= Self.maxTempFileCount
+
+            if tooOld || overLimit {
+                try? fm.removeItem(at: fileURL)
+            }
+        }
     }
 
     private func resolveTargetDevice(
@@ -272,6 +316,13 @@ private final class AVCaptureAudioRecordingSession: NSObject, AudioCaptureRecord
     private var isCancelled = false
     private var observers: [NSObjectProtocol] = []
     private var mutableArtifact: SessionAudioArtifact
+
+    deinit {
+        // Safety net: remove any lingering observers to prevent leaks
+        // if cleanup() was not called due to an exception or early return.
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers.removeAll()
+    }
 
     var artifact: SessionAudioArtifact {
         stateQueue.sync { mutableArtifact }
@@ -429,17 +480,19 @@ private final class AVCaptureAudioRecordingSession: NSObject, AudioCaptureRecord
     }
 
     private func write(buffer: AVAudioPCMBuffer) throws {
-        try fileWriteQueue.sync {
+        try fileWriteQueue.sync { [self] in
             if audioFile == nil {
                 audioFile = try AVAudioFile(forWriting: artifact.fileURL, settings: buffer.format.settings)
                 currentFormat = buffer.format
-                stateQueue.sync {
+                let sampleRate = buffer.format.sampleRate
+                let channelCount = buffer.format.channelCount
+                stateQueue.async { [self] in
                     mutableArtifact = SessionAudioArtifact(
                         id: mutableArtifact.id,
                         fileURL: mutableArtifact.fileURL,
                         createdAt: mutableArtifact.createdAt,
-                        sampleRate: buffer.format.sampleRate,
-                        channelCount: buffer.format.channelCount,
+                        sampleRate: sampleRate,
+                        channelCount: channelCount,
                         duration: mutableArtifact.duration,
                         inputDevice: mutableArtifact.inputDevice
                     )

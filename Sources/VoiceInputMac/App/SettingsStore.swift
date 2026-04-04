@@ -34,11 +34,21 @@ final class SettingsStore: ObservableObject {
     @Published var settings: AppSettings {
         didSet {
             save()
+            // Only reset test results when online-relevant fields actually change,
+            // and never while a test is in progress.
             if case .testing = onlineTestState {
-            } else {
+                // Don't interrupt an active test.
+            } else if onlineConfigChanged(old: oldValue, new: settings) {
                 onlineTestState = .idle
             }
         }
+    }
+
+    private func onlineConfigChanged(old: AppSettings, new: AppSettings) -> Bool {
+        old.apiKey != new.apiKey
+            || old.apiEndpoint != new.apiEndpoint
+            || old.modelName != new.modelName
+            || old.onlineProvider != new.onlineProvider
     }
     @Published private(set) var onlineTestState: OnlineTestState = .idle
     @Published private(set) var microphoneDevices: [MicrophoneDeviceInfo] = []
@@ -109,28 +119,34 @@ final class SettingsStore: ObservableObject {
         )
     }
 
+    func promptAssetBinding(for keyPath: WritableKeyPath<AppSettings, String>) -> Binding<String> {
+        Binding(
+            get: { self.settings[keyPath: keyPath] },
+            set: {
+                self.settings[keyPath: keyPath] = $0
+                self.syncLegacyPromptTemplates()
+            }
+        )
+    }
+
     func restoreBuiltInFujianPack() {
         settings.enableBuiltInFujianPack = true
     }
 
     func restorePromptTemplates() {
-        settings.optimizerSystemPromptTemplate = BuiltInFujianPreset.systemPromptTemplate(for: settings.speechMode)
-        settings.optimizerUserPromptTemplate = BuiltInFujianPreset.userPromptTemplate(for: settings.speechMode)
+        settings.onlinePromptAssets = BuiltInFujianPreset.promptAssets(for: settings.speechMode)
     }
 
     func setSpeechMode(_ mode: SpeechMode) {
-        let previousSystemPrompt = settings.optimizerSystemPromptTemplate
-        let previousUserPrompt = settings.optimizerUserPromptTemplate
-        let oldDefaultSystem = BuiltInFujianPreset.systemPromptTemplate(for: settings.speechMode)
-        let oldDefaultUser = BuiltInFujianPreset.userPromptTemplate(for: settings.speechMode)
+        let previousAssets = settings.onlinePromptAssets
+        let oldDefaultAssets = BuiltInFujianPreset.promptAssets(for: settings.speechMode)
 
         settings.speechMode = mode
 
-        if previousSystemPrompt == oldDefaultSystem {
-            settings.optimizerSystemPromptTemplate = BuiltInFujianPreset.systemPromptTemplate(for: mode)
-        }
-        if previousUserPrompt == oldDefaultUser {
-            settings.optimizerUserPromptTemplate = BuiltInFujianPreset.userPromptTemplate(for: mode)
+        if previousAssets == oldDefaultAssets {
+            settings.onlinePromptAssets = BuiltInFujianPreset.promptAssets(for: mode)
+        } else {
+            syncLegacyPromptTemplates()
         }
     }
 
@@ -325,7 +341,7 @@ final class SettingsStore: ObservableObject {
 
         if updated.speechMode == .general,
            isLegacyGeneralSystemPrompt(updated.optimizerSystemPromptTemplate) {
-            updated.optimizerSystemPromptTemplate = BuiltInFujianPreset.systemPromptTemplate(for: .general)
+            updated.onlinePromptAssets = BuiltInFujianPreset.promptAssets(for: .general)
         }
 
         return updated
@@ -415,5 +431,10 @@ final class SettingsStore: ObservableObject {
         ]
 
         return legacyPrefixes.contains { normalized.hasPrefix($0) }
+    }
+
+    private func syncLegacyPromptTemplates() {
+        settings.optimizerSystemPromptTemplate = settings.renderedOptimizerSystemPromptTemplate
+        settings.optimizerUserPromptTemplate = settings.onlinePromptAssets.userPromptTemplate
     }
 }

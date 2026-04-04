@@ -91,6 +91,7 @@ private final class FakeDictationPipelineForAppState: DictationPipelineControlli
         onPreview: @escaping @Sendable (String) -> Void,
         onSegments: @escaping @Sendable ([TranscriptSegment]) -> Void,
         onActiveInputDevice: @escaping @Sendable (ActiveInputDeviceInfo) -> Void,
+        onAudioLevel: @escaping @Sendable (Float) -> Void,
         onFailure: @escaping @Sendable (Error) -> Void
     ) async throws {
         failureHandler = onFailure
