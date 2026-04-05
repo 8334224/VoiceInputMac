@@ -214,9 +214,13 @@ final class AppState: ObservableObject {
             case .disabled:
                 statusText = "已完成"
                 completionDetail = ""
-            case .optimized:
+            case let .optimized(elapsed, quotaSummary):
                 statusText = "已完成（已使用在线纠错）"
-                completionDetail = "本次结果已使用在线纠错。"
+                var detail = "本次结果已使用在线纠错。耗时 \(String(format: "%.1f", elapsed)) 秒"
+                if let quota = quotaSummary {
+                    detail += "，\(quota)"
+                }
+                completionDetail = detail
             case let .fallback(reason):
                 statusText = "已完成（已回退本地结果）"
                 completionDetail = reason

@@ -14,7 +14,7 @@ struct MicrophoneDeviceChangeEvent: Equatable, Sendable {
     var logDescription: String {
         let name = deviceName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let id = deviceID?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return "\(kind.rawValue) name=\(name?.nilIfEmpty ?? "-") id=\(id?.nilIfEmpty ?? "-")"
+        return "\(kind.rawValue) name=\(name?.nilIfBlank ?? "-") id=\(id?.nilIfBlank ?? "-")"
     }
 }
 
@@ -79,12 +79,5 @@ final class AVFoundationMicrophoneDeviceChangeMonitor: MicrophoneDeviceChangeObs
         Task { @MainActor [onChange] in
             onChange?(event)
         }
-    }
-}
-
-private extension String {
-    var nilIfEmpty: String? {
-        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
     }
 }

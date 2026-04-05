@@ -8,7 +8,7 @@ struct DefaultInputDeviceChangeEvent: Equatable, Sendable {
     var logDescription: String {
         let name = deviceName?.trimmingCharacters(in: .whitespacesAndNewlines)
         let id = deviceID?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return "default name=\(name?.nilIfEmpty ?? "-") id=\(id?.nilIfEmpty ?? "-")"
+        return "default name=\(name?.nilIfBlank ?? "-") id=\(id?.nilIfBlank ?? "-")"
     }
 }
 
@@ -197,9 +197,3 @@ private func audioDeviceUID(for deviceID: AudioDeviceID) -> String? {
     return uid as String
 }
 
-private extension String {
-    var nilIfEmpty: String? {
-        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-}

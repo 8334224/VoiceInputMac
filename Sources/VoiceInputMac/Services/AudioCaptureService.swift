@@ -255,18 +255,11 @@ final class AudioCaptureService {
                 throw AudioCaptureError.selectedInputDeviceUnavailable("未指定设备")
             }
             guard let device = availableDevices.first(where: { $0.id == targetID }) else {
-                let fallbackName = selection.selectedMicrophoneName.nilIfEmpty ?? "已保存设备"
+                let fallbackName = selection.selectedMicrophoneName.nilIfBlank ?? "已保存设备"
                 throw AudioCaptureError.selectedInputDeviceUnavailable(fallbackName)
             }
             return (device.id, device.name)
         }
-    }
-}
-
-private extension String {
-    var nilIfEmpty: String? {
-        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
     }
 }
 

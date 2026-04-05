@@ -1,9 +1,41 @@
 import Foundation
 
 struct OnlineOptimizer {
+    struct QuotaInfo: Equatable, Sendable {
+        let remainingRequests: Int?
+        let limitRequests: Int?
+        let remainingTokens: Int?
+        let limitTokens: Int?
+
+        var summary: String? {
+            if let remaining = remainingRequests, let limit = limitRequests {
+                return "剩余额度：\(remaining)/\(limit) 次请求"
+            }
+            if let remaining = remainingTokens, let limit = limitTokens {
+                return "剩余额度：\(remaining)/\(limit) tokens"
+            }
+            if let remaining = remainingRequests {
+                return "剩余请求：\(remaining) 次"
+            }
+            return nil
+        }
+
+        static func from(_ httpResponse: HTTPURLResponse) -> QuotaInfo? {
+            let headers = httpResponse.allHeaderFields
+            let remainReq = (headers["x-ratelimit-remaining-requests"] as? String).flatMap(Int.init)
+            let limitReq = (headers["x-ratelimit-limit-requests"] as? String).flatMap(Int.init)
+            let remainTok = (headers["x-ratelimit-remaining-tokens"] as? String).flatMap(Int.init)
+            let limitTok = (headers["x-ratelimit-limit-tokens"] as? String).flatMap(Int.init)
+            if remainReq != nil || limitReq != nil || remainTok != nil || limitTok != nil {
+                return QuotaInfo(remainingRequests: remainReq, limitRequests: limitReq, remainingTokens: remainTok, limitTokens: limitTok)
+            }
+            return nil
+        }
+    }
+
     enum AttemptResult {
         case notEnabled(String)
-        case optimized(String)
+        case optimized(String, quota: QuotaInfo?, elapsed: TimeInterval)
         case fallbackToLocal(String, reason: String)
     }
 
@@ -95,7 +127,7 @@ struct OnlineOptimizer {
 
     func optimize(_ text: String, settings: AppSettings, correctionPipeline: TextCorrectionPipeline) async throws -> String {
         switch await optimizeWithDiagnostics(text, settings: settings, correctionPipeline: correctionPipeline) {
-        case let .notEnabled(result), let .optimized(result), let .fallbackToLocal(result, _):
+        case let .notEnabled(result), let .optimized(result, _, _), let .fallbackToLocal(result, _):
             return result
         }
     }
@@ -103,11 +135,12 @@ struct OnlineOptimizer {
     func optimizeWithDiagnostics(_ text: String, settings: AppSettings, correctionPipeline: TextCorrectionPipeline) async -> AttemptResult {
         guard settings.onlineOptimizationEnabled else { return .notEnabled(text) }
 
+        let start = Date()
         return await withTaskGroup(of: AttemptResult.self) { group in
             group.addTask {
                 do {
-                    let optimized = try await requestOptimizedText(text, settings: settings, correctionPipeline: correctionPipeline)
-                    return .optimized(optimized)
+                    let (optimized, quota) = try await requestOptimizedText(text, settings: settings, correctionPipeline: correctionPipeline)
+                    return .optimized(optimized, quota: quota, elapsed: Date().timeIntervalSince(start))
                 } catch {
                     return .fallbackToLocal(text, reason: error.localizedDescription)
                 }
@@ -124,7 +157,7 @@ struct OnlineOptimizer {
         }
     }
 
-    func testConnection(settings: AppSettings, correctionPipeline: TextCorrectionPipeline) async throws -> String {
+    func testConnection(settings: AppSettings, correctionPipeline: TextCorrectionPipeline) async throws -> (String, QuotaInfo?) {
         let messages = [
             RequestBody.Message(role: "system", content: "你是在线配置测试助手。请严格只返回“在线配置成功”。"),
             RequestBody.Message(role: "user", content: "请只回复：在线配置成功")
@@ -138,8 +171,8 @@ struct OnlineOptimizer {
         )
     }
 
-    private func requestOptimizedText(_ text: String, settings: AppSettings, correctionPipeline: TextCorrectionPipeline) async throws -> String {
-        guard settings.onlineOptimizationEnabled else { return text }
+    private func requestOptimizedText(_ text: String, settings: AppSettings, correctionPipeline: TextCorrectionPipeline) async throws -> (String, QuotaInfo?) {
+        guard settings.onlineOptimizationEnabled else { return (text, nil) }
 
         let phrases = correctionPipeline.customPhrases.joined(separator: "、")
         let ruleHints = correctionPipeline.replacementRules
@@ -181,7 +214,7 @@ struct OnlineOptimizer {
         settings: AppSettings,
         correctionPipeline: TextCorrectionPipeline,
         skipEnabledCheck: Bool = false
-    ) async throws -> String {
+    ) async throws -> (String, QuotaInfo?) {
         _ = correctionPipeline
 
         let apiKey = settings.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -243,6 +276,8 @@ struct OnlineOptimizer {
             throw serverError(from: data, response: response)
         }
 
+        let quota = QuotaInfo.from(httpResponse)
+
         if settings.onlineProvider == .googleGemini {
             let decoded: GeminiResponseBody
             do {
@@ -263,7 +298,7 @@ struct OnlineOptimizer {
                 throw OptimizationError.emptyResponse
             }
 
-            return optimized
+            return (optimized, quota)
         } else {
             let decoded: ResponseBody
             do {
@@ -277,7 +312,7 @@ struct OnlineOptimizer {
                 throw OptimizationError.emptyResponse
             }
 
-            return optimized
+            return (optimized, quota)
         }
     }
 

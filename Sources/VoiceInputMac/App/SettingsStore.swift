@@ -59,6 +59,7 @@ final class SettingsStore: ObservableObject {
     )
 
     private let defaultsKey = "voice_input_mac_settings"
+    private static let keychainAPIKeyKey = "api_key"
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private let userDefaults: UserDefaults
@@ -78,6 +79,13 @@ final class SettingsStore: ObservableObject {
         self.microphoneDeviceChangeMonitor = microphoneDeviceChangeMonitor
         self.defaultInputDeviceChangeMonitor = defaultInputDeviceChangeMonitor ?? CoreAudioDefaultInputDeviceChangeMonitor(deviceProvider: microphoneDeviceProvider)
 
+        // Load API Key from Keychain (or migrate from legacy UserDefaults) BEFORE
+        // assigning to `settings`, because didSet triggers save() which would
+        // overwrite the Keychain with an empty value.
+        let restoredAPIKey = Self.loadAPIKey(
+            from: userDefaults, defaultsKey: defaultsKey
+        )
+
         if let data = userDefaults.data(forKey: defaultsKey),
            let stored = try? decoder.decode(AppSettings.self, from: data) {
             var normalized = stored
@@ -96,9 +104,12 @@ final class SettingsStore: ObservableObject {
             normalized = Self.migrateBundledPromptTemplates(in: normalized)
             normalized = Self.ensureDefaultPersonalRules(in: normalized)
             normalized = Self.normalizeMicrophoneSelection(in: normalized)
+            normalized.apiKey = restoredAPIKey
             settings = normalized
         } else {
-            settings = Self.normalizeMicrophoneSelection(in: Self.ensureDefaultPersonalRules(in: AppSettings()))
+            var fresh = Self.normalizeMicrophoneSelection(in: Self.ensureDefaultPersonalRules(in: AppSettings()))
+            fresh.apiKey = restoredAPIKey
+            settings = fresh
         }
 
         reloadMicrophoneDevices()
@@ -182,9 +193,13 @@ final class SettingsStore: ObservableObject {
         onlineTestState = .testing
 
         do {
-            let response = try await optimizer.testConnection(settings: snapshot, correctionPipeline: correctionPipeline)
+            let (response, quota) = try await optimizer.testConnection(settings: snapshot, correctionPipeline: correctionPipeline)
             let elapsed = Date().timeIntervalSince(start)
-            onlineTestState = .success("连接成功，耗时 \(String(format: "%.1f", elapsed)) 秒，返回：\(response)")
+            var message = "连接成功，耗时 \(String(format: "%.1f", elapsed)) 秒，返回：\(response)"
+            if let quotaSummary = quota?.summary {
+                message += "（\(quotaSummary)）"
+            }
+            onlineTestState = .success(message)
         } catch {
             onlineTestState = .failure(error.localizedDescription)
         }
@@ -281,6 +296,30 @@ final class SettingsStore: ObservableObject {
     private func save() {
         guard let data = try? encoder.encode(settings) else { return }
         userDefaults.set(data, forKey: defaultsKey)
+        // API Key is stored separately in the Keychain, never in UserDefaults.
+        KeychainHelper.save(key: Self.keychainAPIKeyKey, value: settings.apiKey)
+    }
+
+    /// Load API Key from Keychain, with one-time migration from legacy UserDefaults.
+    /// Called as a static method so it can run BEFORE the first `settings` assignment.
+    private static func loadAPIKey(from userDefaults: UserDefaults, defaultsKey: String) -> String {
+        // 1. Try reading from Keychain first.
+        if let keychainValue = KeychainHelper.read(key: keychainAPIKeyKey),
+           !keychainValue.isEmpty {
+            return keychainValue
+        }
+
+        // 2. Migration: check if apiKey exists in the old UserDefaults JSON.
+        if let data = userDefaults.data(forKey: defaultsKey),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let legacyKey = json["apiKey"] as? String,
+           !legacyKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            KeychainHelper.save(key: keychainAPIKeyKey, value: legacyKey)
+            print("[SettingsStore] 已将 API Key 从 UserDefaults 迁移到 Keychain。")
+            return legacyKey
+        }
+
+        return ""
     }
 
     private static func inferredOnlineProvider(for settings: AppSettings) -> OnlineProvider {
@@ -292,6 +331,10 @@ final class SettingsStore: ObservableObject {
 
         if endpoint.contains("generativelanguage.googleapis.com") {
             return .googleGemini
+        }
+
+        if endpoint.contains("models.inference.ai.azure.com") {
+            return .githubModels
         }
 
         if endpoint.contains("api.openai.com")

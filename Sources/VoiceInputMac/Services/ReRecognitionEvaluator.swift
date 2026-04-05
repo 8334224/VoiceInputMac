@@ -298,10 +298,10 @@ struct ReRecognitionEvaluator {
     }
 
     private func matchedHotwordCount(in text: String) -> Int {
-        let normalized = normalizedASCII(text)
+        let normalized = text.asciiNormalized
         guard !normalized.isEmpty else { return 0 }
         return asciiPriorityPhrases.reduce(into: 0) { partialResult, phrase in
-            let normalizedPhrase = normalizedASCII(phrase)
+            let normalizedPhrase = phrase.asciiNormalized
             if !normalizedPhrase.isEmpty, normalized.contains(normalizedPhrase) {
                 partialResult += 1
             }
@@ -322,9 +322,9 @@ struct ReRecognitionEvaluator {
     }
 
     private func hasAcronymCaseDrop(token: String) -> Bool {
-        let normalized = normalizedASCII(token)
+        let normalized = token.asciiNormalized
         guard normalized.count >= 2, normalized.count <= 5 else { return false }
-        return uppercasePriorityPhrases.contains(where: { normalizedASCII($0) == normalized && $0 != token })
+        return uppercasePriorityPhrases.contains(where: { $0.asciiNormalized == normalized && $0 != token })
     }
 
     private func hasNumberUnitAnomaly(_ text: String) -> Bool {
@@ -342,7 +342,7 @@ struct ReRecognitionEvaluator {
 
     private func informationDensity(_ text: String) -> Double {
         guard !text.isEmpty else { return 0 }
-        let informativeCount = text.filter { $0.isLetter || $0.isNumber || isCJK($0) }.count
+        let informativeCount = text.filter { $0.isLetter || $0.isNumber || $0.isCJK }.count
         return Double(informativeCount) / Double(text.count)
     }
 
@@ -356,23 +356,21 @@ struct ReRecognitionEvaluator {
         }
     }
 
-    private func normalizedASCII(_ text: String) -> String {
-        text.lowercased().filter { $0.isLetter || $0.isNumber }
-    }
+
 
     private func isLikelyChineseWindow(_ text: String) -> Bool {
-        let cjkCount = text.filter(isCJK).count
+        let cjkCount = text.filter(\.isCJK).count
         guard cjkCount >= 3 else { return false }
         return cjkRatio(in: text) >= 0.35
     }
 
     private func containsEnoughChineseContent(_ text: String) -> Bool {
-        text.filter(isCJK).count >= 3 && cjkRatio(in: text) >= 0.5
+        text.filter(\.isCJK).count >= 3 && cjkRatio(in: text) >= 0.5
     }
 
     private func cjkRatio(in text: String) -> Double {
         guard !text.isEmpty else { return 0 }
-        let cjkCount = text.filter(isCJK).count
+        let cjkCount = text.filter(\.isCJK).count
         return Double(cjkCount) / Double(text.count)
     }
 
@@ -382,7 +380,7 @@ struct ReRecognitionEvaluator {
 
         let lowerTokens = asciiTokens.map { $0.lowercased() }
         let cjkRatio = cjkRatio(in: text)
-        let containsCJK = text.contains(where: isCJK)
+        let containsCJK = text.contains(where: \.isCJK)
         let suspiciousEnglishWords = Set(["you", "your", "and", "then", "write", "written", "translated", "translation", "in", "it"])
         let suspiciousHitCount = lowerTokens.filter { suspiciousEnglishWords.contains($0) }.count
 
@@ -408,7 +406,7 @@ struct ReRecognitionEvaluator {
 
     private func mixedLanguageNaturalnessPenalty(in text: String) -> Int {
         let asciiTokens = englishWordTokens(in: text)
-        let containsCJK = text.contains(where: isCJK)
+        let containsCJK = text.contains(where: \.isCJK)
         guard containsCJK, !asciiTokens.isEmpty else { return 0 }
 
         if text.range(of: #"[A-Za-z]{2,}[^\s，。！？；,!?]*[\u4E00-\u9FFF]"#, options: .regularExpression) != nil {
@@ -671,28 +669,9 @@ struct ReRecognitionEvaluator {
         return best
     }
 
-    private func editDistance(_ lhs: [Character], _ rhs: [Character]) -> Int {
-        if lhs.isEmpty { return rhs.count }
-        if rhs.isEmpty { return lhs.count }
-
-        var previous = Array(0...rhs.count)
-        for (i, left) in lhs.enumerated() {
-            var current = [i + 1] + Array(repeating: 0, count: rhs.count)
-            for (j, right) in rhs.enumerated() {
-                let substitutionCost = left == right ? 0 : 1
-                current[j + 1] = min(
-                    previous[j + 1] + 1,
-                    current[j] + 1,
-                    previous[j] + substitutionCost
-                )
-            }
-            previous = current
-        }
-        return previous[rhs.count]
-    }
 
     private func normalizedChinese(_ text: String) -> String {
-        String(text.filter(isCJK))
+        text.cjkOnly
     }
 
     private func foldedChinese(_ text: String) -> String {
@@ -734,10 +713,5 @@ struct ReRecognitionEvaluator {
         }
     }
 
-    private func isCJK(_ character: Character) -> Bool {
-        character.unicodeScalars.contains { scalar in
-            (0x4E00...0x9FFF).contains(scalar.value)
-                || (0x3400...0x4DBF).contains(scalar.value)
-        }
-    }
+
 }

@@ -28,6 +28,8 @@ struct AppSettings: Codable {
     var onlineOptimizationEnabled: Bool
     var onlineProvider: OnlineProvider
     var apiEndpoint: String
+    /// API Key is stored in the macOS Keychain, NOT serialized to UserDefaults.
+    /// This property is populated by `SettingsStore` after loading.
     var apiKey: String
     var modelName: String
     var enableBuiltInFujianPack: Bool
@@ -43,6 +45,21 @@ struct AppSettings: Codable {
     var optimizerUserPromptTemplate: String
     var onlineSoftTimeoutSeconds: Double
     var requestTimeoutSeconds: Double
+
+    // Explicitly list CodingKeys to EXCLUDE apiKey from serialization.
+    private enum CodingKeys: String, CodingKey {
+        case localeIdentifier, autoPaste, preserveClipboard
+        case microphoneSelectionMode, selectedMicrophoneID, selectedMicrophoneName
+        case hotKey, hotKeyMode, switchInputMethodBeforePaste
+        case speechMode, onlineOptimizationEnabled, onlineProvider
+        case apiEndpoint, modelName
+        case enableBuiltInFujianPack, enableCustomCorrectionLexicon
+        case customPhrasesText, replacementRulesText, extraPrompt
+        case optimizerRolePromptAsset, optimizerStylePromptAsset
+        case optimizerVocabularyPromptAsset, optimizerOutputPromptAsset
+        case optimizerSystemPromptTemplate, optimizerUserPromptTemplate
+        case onlineSoftTimeoutSeconds, requestTimeoutSeconds
+    }
 
     init() {
         let promptAssets = BuiltInFujianPreset.promptAssets(for: .general)
@@ -92,7 +109,8 @@ struct AppSettings: Codable {
         onlineOptimizationEnabled = try container.decodeIfPresent(Bool.self, forKey: .onlineOptimizationEnabled) ?? defaults.onlineOptimizationEnabled
         onlineProvider = try container.decodeIfPresent(OnlineProvider.self, forKey: .onlineProvider) ?? defaults.onlineProvider
         apiEndpoint = try container.decodeIfPresent(String.self, forKey: .apiEndpoint) ?? defaults.apiEndpoint
-        apiKey = try container.decodeIfPresent(String.self, forKey: .apiKey) ?? defaults.apiKey
+        // apiKey is NOT decoded from JSON — it is loaded from Keychain by SettingsStore.
+        apiKey = ""
         modelName = try container.decodeIfPresent(String.self, forKey: .modelName) ?? defaults.modelName
         enableBuiltInFujianPack = try container.decodeIfPresent(Bool.self, forKey: .enableBuiltInFujianPack) ?? defaults.enableBuiltInFujianPack
         enableCustomCorrectionLexicon = try container.decodeIfPresent(Bool.self, forKey: .enableCustomCorrectionLexicon) ?? defaults.enableCustomCorrectionLexicon

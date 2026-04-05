@@ -160,6 +160,9 @@ final class AppleSpeechRecognitionBackend: RecognitionBackend {
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private var finishContinuation: CheckedContinuation<RecognitionResultSnapshot, Error>?
+    /// Guards all reads/writes of `finishContinuation` to prevent a race
+    /// between the recognition callback thread and the timeout Task.
+    private let continuationLock = NSLock()
     private var latestSnapshot: RecognitionResultSnapshot
     private var onUpdate: ((RecognitionResultSnapshot) -> Void)?
     private var isStopping = false
@@ -281,11 +284,15 @@ final class AppleSpeechRecognitionBackend: RecognitionBackend {
         let fallback = latestSnapshot
 
         return try await withCheckedThrowingContinuation { continuation in
+            continuationLock.lock()
             finishContinuation = continuation
+            continuationLock.unlock()
 
             Task { [weak self] in
                 try? await Task.sleep(nanoseconds: timeoutNanoseconds)
-                guard let self, self.finishContinuation != nil else { return }
+                guard let self else { return }
+                // finishIfNeeded is already guarded by continuationLock internally,
+                // so it's safe to call from here — duplicate calls are no-ops.
                 self.finishIfNeeded(with: .success(self.latestSnapshot.rawText.isEmpty ? fallback : self.latestSnapshot))
             }
         }
@@ -326,8 +333,13 @@ final class AppleSpeechRecognitionBackend: RecognitionBackend {
     }
 
     private func finishIfNeeded(with result: Result<RecognitionResultSnapshot, Error>) {
-        guard let continuation = finishContinuation else { return }
+        continuationLock.lock()
+        guard let continuation = finishContinuation else {
+            continuationLock.unlock()
+            return
+        }
         finishContinuation = nil
+        continuationLock.unlock()
         continuation.resume(with: result)
     }
 
@@ -344,9 +356,12 @@ final class AppleSpeechRecognitionBackend: RecognitionBackend {
         recognizer = nil
         // Resume any pending continuation before dropping it to avoid
         // a leaked continuation (undefined behavior / crash in debug).
-        if let continuation = finishContinuation {
-            finishContinuation = nil
-            continuation.resume(returning: latestSnapshot)
+        continuationLock.lock()
+        let pendingContinuation = finishContinuation
+        finishContinuation = nil
+        continuationLock.unlock()
+        if let pendingContinuation {
+            pendingContinuation.resume(returning: latestSnapshot)
         }
         onUpdate = nil
         isStopping = false

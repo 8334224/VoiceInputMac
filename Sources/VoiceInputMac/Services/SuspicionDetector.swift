@@ -301,11 +301,11 @@ struct SuspicionDetector {
     }
 
     private func detectHotwordMiss(rawText: String, correctedText: String) -> SuspicionFlag? {
-        let normalizedRaw = normalizedASCII(rawText)
-        let normalizedCorrected = normalizedASCII(correctedText)
+        let normalizedRaw = rawText.asciiNormalized
+        let normalizedCorrected = correctedText.asciiNormalized
 
         for phrase in asciiPriorityPhrases {
-            let normalizedPhrase = normalizedASCII(phrase)
+            let normalizedPhrase = phrase.asciiNormalized
             if normalizedPhrase.isEmpty { continue }
 
             if normalizedCorrected.contains(normalizedPhrase) && !normalizedRaw.contains(normalizedPhrase) {
@@ -357,9 +357,9 @@ struct SuspicionDetector {
     }
 
     private func detectHotwordSplitPhraseAnomaly(in context: SegmentContext) -> SuspicionFlag? {
-        let normalizedWindow = normalizedASCII(context.nearbyWindow)
+        let normalizedWindow = context.nearbyWindow.asciiNormalized
         let hasHotwordNearby = knownTechHotwords.contains { hotword in
-            let normalizedHotword = normalizedASCII(hotword)
+            let normalizedHotword = hotword.asciiNormalized
             return !normalizedHotword.isEmpty && normalizedWindow.contains(normalizedHotword)
         }
         guard hasHotwordNearby else { return nil }
@@ -408,9 +408,9 @@ struct SuspicionDetector {
     }
 
     private func detectHotwordContextAnomaly(in context: SegmentContext) -> SuspicionFlag? {
-        let normalizedWindow = normalizedASCII(context.nearbyWindow)
+        let normalizedWindow = context.nearbyWindow.asciiNormalized
         guard knownTechHotwords.contains(where: {
-            let normalizedHotword = normalizedASCII($0)
+            let normalizedHotword = $0.asciiNormalized
             return !normalizedHotword.isEmpty && normalizedWindow.contains(normalizedHotword)
         }) else {
             return nil
@@ -519,9 +519,9 @@ struct SuspicionDetector {
     private func hasAcronymCaseDrop(_ text: String) -> Bool {
         let tokens = text.split(whereSeparator: { $0.isWhitespace || $0.isPunctuation }).map(String.init)
         return tokens.contains { token in
-            let normalized = normalizedASCII(token)
+            let normalized = token.asciiNormalized
             guard normalized.count >= 2, normalized.count <= 5 else { return false }
-            return uppercasePriorityPhrases.contains(where: { normalizedASCII($0) == normalized && $0 != token })
+            return uppercasePriorityPhrases.contains(where: { $0.asciiNormalized == normalized && $0 != token })
         }
     }
 
@@ -548,15 +548,10 @@ struct SuspicionDetector {
     }
 
     private func textSimilarity(_ lhs: String, _ rhs: String) -> Double {
-        let distance = levenshtein(lhs, rhs)
+        let distance = levenshteinDistance(lhs, rhs)
         let base = max(lhs.count, rhs.count)
         guard base > 0 else { return 1 }
         return 1 - Double(distance) / Double(base)
-    }
-
-    private func normalizedASCII(_ text: String) -> String {
-        text.lowercased()
-            .filter { $0.isLetter || $0.isNumber }
     }
 
     private func deduplicated(_ flags: [SuspicionFlag]) -> [SuspicionFlag] {
@@ -567,31 +562,4 @@ struct SuspicionDetector {
         }
     }
 
-    private func levenshtein(_ lhs: String, _ rhs: String) -> Int {
-        let a = Array(lhs)
-        let b = Array(rhs)
-
-        if a.isEmpty { return b.count }
-        if b.isEmpty { return a.count }
-
-        var previous = Array(0...b.count)
-
-        for (i, charA) in a.enumerated() {
-            var current = Array(repeating: 0, count: b.count + 1)
-            current[0] = i + 1
-
-            for (j, charB) in b.enumerated() {
-                let cost = charA == charB ? 0 : 1
-                current[j + 1] = min(
-                    previous[j + 1] + 1,
-                    current[j] + 1,
-                    previous[j] + cost
-                )
-            }
-
-            previous = current
-        }
-
-        return previous[b.count]
-    }
 }
